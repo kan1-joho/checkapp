@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>的中位置記録（STEP 1）</title>
+<title>的中位置記録</title>
 <style>
 :root{--ink:#1d2733;--sub:#4b5663;--line:#c4ccd4;--bg:#f6f8fa;--acc:#0b6bcb;--warn:#c4271d}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.4 system-ui,-apple-system,"Hiragino Sans",sans-serif;-webkit-touch-callout:none}
@@ -19,10 +19,23 @@ button:disabled{opacity:.4}.chip{display:grid;gap:2px;justify-items:center;align
 label{display:flex;align-items:center;gap:8px;min-height:44px}input[type=checkbox]{width:24px;height:24px}#stats{font-weight:600}
 @media (orientation:landscape){main{grid-template-columns:auto 1fr}#target{width:min(56vw,calc(100vh - 110px))}#stage{align-self:start}}
 #save{margin-left:auto;padding:4px 12px;border-radius:999px;font-size:15px;background:#4b5663;color:#fff}#save.ok{background:#1f6f3e}#save.bad{background:var(--warn)}.uns{color:var(--warn);font-weight:700}
+#tabs{display:flex;gap:8px;padding:6px 12px;background:#e3e8ee}.tab{min-height:44px;padding:4px 18px;font-weight:700}.tab.on{background:var(--acc);border-color:var(--acc);color:#fff}
+#banner{padding:8px 12px;background:#fff1cc;color:#6b4a00;font-weight:600}#empty{padding:24px 12px;text-align:center;font-weight:600}
+#rosterView{display:grid;gap:12px;padding:8px 12px;max-width:900px;margin:0 auto}#rosterView[hidden]{display:none}
+.card{background:#fff;border:2px solid var(--line);border-radius:8px;padding:10px;display:grid;gap:8px}.card h2{margin:0;font-size:18px}
+.mrow{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border-top:1px solid var(--line);padding-top:8px}.mrow:first-of-type{border-top:0;padding-top:0}
+.mrow .nm{font-weight:700}.mrow small{color:var(--sub)}.btns{display:flex;gap:6px;flex-wrap:wrap}.btns button{min-height:44px}
+.fld{display:grid;gap:4px}.fld input,.fld select{min-height:44px;font:inherit;border:2px solid var(--line);border-radius:8px;padding:4px 8px}.frm{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;align-items:end}
+.note{color:var(--sub);font-size:14px}.err{color:var(--warn);font-weight:600}.okmsg{color:#1f6f3e;font-weight:600}
+table.prev{border-collapse:collapse;width:100%;font-size:14px}table.prev td,table.prev th{border:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top}table.prev tr.error{background:#fde8e6}table.prev tr.dup_name{background:#fff6dc}
+[hidden]{display:none!important}
 </style></head><body>
-<header><div id="who"></div><div id="now"></div><b id="save"></b><small id="build" style="opacity:.7">build B4（1ファイル版）</small></header>
+<header><div id="who"></div><div id="now"></div><b id="save"></b><small id="build" style="opacity:.7">build 2A-1（1ファイル版）· src:b45b7488</small></header>
+<nav id="tabs"><button id="tabRec" class="tab on">記録</button><button id="tabRoster" class="tab">部員管理</button></nav>
+<div id="banner" hidden></div>
 <pre id="diag" hidden style="margin:0;padding:8px 12px;background:#fde8e6;color:#8a1a12;white-space:pre-wrap;font:14px/1.5 system-ui,sans-serif"></pre>
-<main>
+<div id="empty" hidden></div>
+<main id="recView">
 <div id="stage"><svg id="target" role="img" aria-label="的。タップで着弾位置を記録"></svg><div id="msg" role="status" aria-live="polite"></div></div>
 <aside>
 <div id="chips"></div>
@@ -33,6 +46,7 @@ label{display:flex;align-items:center;gap:8px;min-height:44px}input[type=checkbo
 <label><input type="checkbox" id="flip">左右反転表示（保存座標は変わりません）</label>
 <label>表示範囲 <select id="half"><option value="1.5">±1.5</option><option value="2">±2（標準）</option><option value="3">±3</option></select></label>
 </aside></main>
+<section id="rosterView" hidden></section>
 <script>
 (function () {
   var log = [];
@@ -42,11 +56,12 @@ label{display:flex;align-items:center;gap:8px;min-height:44px}input[type=checkbo
     show(t);
   }, true);
   if (location.protocol === 'file:') show('file:// で開いています。ES Modules は動かないため、http:// のサーバー経由で開いてください');
-  setTimeout(function () { if (!window.__booted) show('app.js が起動しませんでした（読み込み失敗・構文エラー・古いキャッシュのいずれか）。build B4 の index.html は表示されています'); }, 2500);
+  setTimeout(function () { if (!window.__booted) show('アプリが起動しませんでした（構文エラー・古いキャッシュのいずれか）。index.html は表示されています'); }, 2500);
 })();
 </script>
 <script nomodule>document.getElementById('diag').hidden = false; document.getElementById('diag').textContent = 'このブラウザは ES Modules に対応していません（iPadOSを更新してください）';</script>
 <script type="module">
+// ---- geometry.js ----
 // 純粋関数のみ。座標系: 的中心が原点、的半径=1.0、右が+x、下が+y（射手から的を正面に見た向き）
 const HIT_RADIUS = 1.0, BOUNDARY_BAND = 0.10, MAX_ABS = 10, VIEW_HALF = 2.0;
 const EPS = 1e-12;
@@ -68,7 +83,7 @@ function worldToPoint(x, y, rect, { half = VIEW_HALF, flip = false } = {}) {
   return { px: rect.left + (sx / half + 1) / 2 * rect.width, py: rect.top + (y / half + 1) / 2 * rect.height };
 }
 
-
+// ---- store.js ----
 const SHOTS = 4;
 const clone = o => JSON.parse(JSON.stringify(o));
 // 射レコード: null=未入力 / {status:'located',x,y} / {status:'unlocated_miss'}。的中/外れは座標から算出し保存しない
@@ -100,153 +115,697 @@ function createStore(members, init = {}) {
 const statsOf = arr => { const d = arr.filter(Boolean); return { recorded: d.length, hits: d.filter(r => r.status === 'located' && isHit(r.x, r.y)).length }; };
 const totalStats = recs => Object.values(recs).map(statsOf).reduce((a, b) => ({ recorded: a.recorded + b.recorded, hits: a.hits + b.hits }), { recorded: 0, hits: 0 });
 
+// ---- db.js ----
+// DB v2（STEP 2-A）。DB名は STEP 1 から変更しない。
+const NAME = 'kyudo-hit-position', VERSION = 2, SESSION = 'test-session';
 
-const NAME = 'kyudo-hit-position', VERSION = 1, SESSION = 'test-session';
-const migrations = { 1(db) { db.createObjectStore('shots', { keyPath: 'id' }); db.createObjectStore('meta', { keyPath: 'key' }); } };
-const openDb = () => new Promise((res, rej) => {
-  const q = indexedDB.open(NAME, VERSION);
-  q.onupgradeneeded = e => { for (let v = e.oldVersion + 1; v <= e.newVersion; v++) migrations[v](q.result, q.transaction); };
-  q.onblocked = () => rej(new Error('他のタブが使用中です')); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+// 移行は versionchange トランザクション内で実行される。例外が出たら abort し、DBは移行前のまま残る
+const migrations = {
+  1(db) { db.createObjectStore('shots', { keyPath: 'id' }); db.createObjectStore('meta', { keyPath: 'key' }); },
+  2(db, tx) { // STEP 1のテスト用shotsは破棄してよい（承認済み）。metaには触れない
+    const shots = tx.objectStore('shots');
+    shots.clear();
+    shots.createIndex('byMember', 'memberId');
+    db.createObjectStore('members', { keyPath: 'id' });
+  },
+};
+
+// opts: { idb, name, version, migrations, hooks:{afterMigrate(v,db,tx)}（テスト用）, onBlocked(), onVersionChange() }
+const openDb = (opts = {}) => new Promise((res, rej) => {
+  const { idb = globalThis.indexedDB, name = NAME, version = VERSION, migrations: mg = migrations, hooks = {}, onBlocked, onVersionChange } = opts;
+  let failure = null;
+  const q = idb.open(name, version);
+  q.onupgradeneeded = e => {
+    try {
+      for (let v = e.oldVersion + 1; v <= e.newVersion; v++) {
+        mg[v](q.result, q.transaction);
+        if (hooks.afterMigrate) hooks.afterMigrate(v, q.result, q.transaction);
+      }
+    } catch (err) { failure = err; try { q.transaction.abort(); } catch {} } // 全体を破棄し、中途半端なDB状態を残さない
+  };
+  // blocked: 他の接続が閉じるまで待つ。即座には失敗にせず、呼び出し側のタイムアウトに任せる
+  q.onblocked = () => { if (onBlocked) onBlocked(); };
+  q.onsuccess = () => {
+    const d = q.result;
+    d.onversionchange = () => { try { d.close(); } catch {} if (onVersionChange) onVersionChange(); };
+    res(d);
+  };
+  q.onerror = () => rej(failure || q.error);
 });
-const done = tx => new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = tx.onabort = () => rej(tx.error); });
-async function loadShots(db) {
+
+const done = tx => new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = tx.onabort = () => rej(tx.error || new Error('トランザクションが中止されました')); });
+
+// memberIds を渡したときは、その部員の射だけを返す（非表示部員の記録は読まない）
+async function loadShots(db, memberIds) {
+  const want = memberIds ? new Set(memberIds) : null;
   const tx = db.transaction('shots'), q = tx.objectStore('shots').getAll(); await done(tx);
   const out = {};
-  for (const r of q.result) if (r.sessionId === SESSION)
+  for (const r of q.result) if (r.sessionId === SESSION && (!want || want.has(r.memberId)))
     (out[r.memberId] || (out[r.memberId] = Array(SHOTS).fill(null)))[r.shotIndex] = r.status === 'located' ? { status: 'located', x: r.x, y: r.y } : { status: 'unlocated_miss' };
   return out;
 }
-async function saveShots(db, records) { // STEP 1: 単一セッションを全置換（STEP 2以降で練習日単位に拡張）
-  const tx = db.transaction('shots', 'readwrite'), st = tx.objectStore('shots'), now = Date.now();
-  st.clear();
-  for (const [mid, arr] of Object.entries(records)) arr.forEach((r, i) => {
-    if (r) st.put({ id: `${SESSION}:${mid}:${i}`, sessionId: SESSION, memberId: mid, shotIndex: i, status: r.status, ...(r.status === 'located' ? { x: r.x, y: r.y } : {}), updatedAt: now });
+
+const okShot = r => r === null || (!!r && ((r.status === 'located' && Number.isFinite(r.x) && Number.isFinite(r.y)) || r.status === 'unlocated_miss'));
+function validateByMember(byMember) {
+  if (!byMember || typeof byMember !== 'object') throw new TypeError('保存対象の部員が指定されていません');
+  const ids = Object.keys(byMember);
+  if (!ids.length) throw new TypeError('保存対象の部員が空です');
+  for (const id of ids) {
+    if (!id || id.includes(':')) throw new TypeError(`部員IDが不正です: ${id}`);
+    const a = byMember[id];
+    if (!Array.isArray(a) || a.length !== SHOTS || !a.every(okShot)) throw new TypeError(`射データが不正です: ${id}`);
+  }
+  return ids;
+}
+
+// 指定した部員の射だけを置き換える。削除・置換は単一トランザクション。成功は tx.oncomplete でのみ判定する
+// 他の部員（非表示部員を含む）のレコードには一切触れない
+function saveMemberShots(db, byMember) {
+  let ids;
+  try { ids = validateByMember(byMember); } catch (e) { return Promise.reject(e); } // トランザクションを開く前に拒否
+  const tx = db.transaction('shots', 'readwrite'), st = tx.objectStore('shots'), idx = st.index('byMember'), now = Date.now();
+  const p = done(tx);
+  let left = ids.length;
+  const stale = [];
+  for (const mid of ids) {
+    const rq = idx.getAll(IDBKeyRange.only(mid));
+    rq.onsuccess = () => {
+      for (const r of rq.result) if (r.sessionId === SESSION) stale.push(r.id);
+      if (--left) return;
+      for (const k of stale) st.delete(k); // 先に削除してから…
+      for (const m2 of ids) byMember[m2].forEach((r, i) => { // …新しい射を書く
+        if (r) st.put({ id: `${SESSION}:${m2}:${i}`, sessionId: SESSION, memberId: m2, shotIndex: i, status: r.status, ...(r.status === 'located' ? { x: r.x, y: r.y } : {}), updatedAt: now });
+      });
+    };
+  }
+  return p;
+}
+
+// ---- roster.js ----
+// 部員データの形・検証・順序（純粋関数。DBやDOMには触れない）
+// 部員: { id, name, kana, grade, status, hiddenReason, hiddenAt, sortOrder, createdAt, updatedAt }
+const STATUS_ACTIVE = 'active', STATUS_HIDDEN = 'hidden';
+const HIDDEN_REASONS = ['退部', '卒業', '誤登録', 'その他'];
+const NAME_MAX = 40, KANA_MAX = 80;
+
+// 氏名・ふりがな: NFKC正規化、連続空白を1つにして前後を除く
+const cleanText = s => String(s == null ? '' : s).normalize('NFKC').replace(/\s+/g, ' ').trim();
+// 氏名の同一判定用: 空白をすべて除いて比較
+const nameKey = s => cleanText(s).replace(/\s/g, '');
+// 学年: 空→null、1/2/3（全角・「1年」可）→数値、それ以外→NaN
+function parseGrade(v) {
+  const t = cleanText(v);
+  if (t === '') return null;
+  const m = /^([123])年?$/.exec(t);
+  return m ? +m[1] : NaN;
+}
+const isDangerousLead = s => /^[=+\-@\t\r]/.test(s);
+
+function makeId(cryptoObj = globalThis.crypto) {
+  let u;
+  if (cryptoObj && cryptoObj.randomUUID) u = cryptoObj.randomUUID();
+  else {
+    const b = new Uint8Array(16); cryptoObj.getRandomValues(b);
+    u = [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+  }
+  return 'm_' + u.replace(/-/g, '');
+}
+
+function validateFields({ name, kana, grade }) {
+  const errors = [];
+  const n = cleanText(name), k = cleanText(kana), g = grade === undefined || grade === null || grade === '' ? null : (typeof grade === 'number' ? (grade >= 1 && grade <= 3 && Number.isInteger(grade) ? grade : NaN) : parseGrade(grade));
+  if (!n) errors.push('氏名は必須です');
+  if (n.length > NAME_MAX) errors.push(`氏名は${NAME_MAX}文字までです`);
+  if (k.length > KANA_MAX) errors.push(`ふりがなは${KANA_MAX}文字までです`);
+  if (Number.isNaN(g)) errors.push('学年は 1・2・3 または空欄にしてください');
+  return { ok: !errors.length, errors, value: { name: n, kana: k, grade: Number.isNaN(g) ? null : g } };
+}
+
+function validateMember(m) {
+  if (!m) return { ok: false, errors: ['部員データがありません'] };
+  const errors = [];
+  if (!m || typeof m.id !== 'string' || !m.id || m.id.includes(':')) errors.push('部員IDが不正です');
+  const f = validateFields(m || {}); errors.push(...f.errors);
+  if (m.status !== STATUS_ACTIVE && m.status !== STATUS_HIDDEN) errors.push('statusが不正です');
+  if (m.status === STATUS_HIDDEN && (!m.hiddenReason || !Number.isFinite(m.hiddenAt))) errors.push('非表示には理由と日時が必要です');
+  if (m.status === STATUS_ACTIVE && (m.hiddenReason != null || m.hiddenAt != null)) errors.push('表示中の部員に非表示情報があります');
+  if (!Number.isFinite(m.sortOrder)) errors.push('sortOrderが不正です');
+  return { ok: !errors.length, errors };
+}
+
+const newMember = (fields, { id, now, sortOrder }) => {
+  const f = validateFields(fields);
+  if (!f.ok) throw new Error(f.errors.join(' / '));
+  return { id, ...f.value, status: STATUS_ACTIVE, hiddenReason: null, hiddenAt: null, sortOrder, createdAt: now, updatedAt: now };
+};
+const hideMember = (m, reason, now) => {
+  if (!reason) throw new Error('非表示の理由が必要です');
+  return { ...m, status: STATUS_HIDDEN, hiddenReason: reason, hiddenAt: now, updatedAt: now };
+};
+// 再表示すると名簿の末尾に戻る
+const showMember = (m, now, sortOrder) => ({ ...m, status: STATUS_ACTIVE, hiddenReason: null, hiddenAt: null, sortOrder, updatedAt: now });
+
+const byOrder = (a, b) => (a.sortOrder - b.sortOrder) || (a.createdAt - b.createdAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+const sortActive = ms => ms.filter(m => m.status === STATUS_ACTIVE).sort(byOrder);
+const sortHidden = ms => ms.filter(m => m.status === STATUS_HIDDEN).sort((a, b) => (a.hiddenAt - b.hiddenAt) || byOrder(a, b));
+const nextSortOrder = ms => ms.reduce((mx, m) => Math.max(mx, m.sortOrder), -1) + 1; // 全部員（非表示を含む）の最大値+1
+// 部員構成 = 有効部員のIDの並び。氏名などの編集では変わらない
+const configSignature = ms => sortActive(ms).map(m => m.id).join('|');
+
+// ---- roster-store.js ----
+// membersストアのCRUD。部員の削除機能はない（非表示のみ）。書き込みはすべて単一トランザクション
+const get = (st, id) => new Promise((res, rej) => { const q = st.get(id); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+const all = st => new Promise((res, rej) => { const q = st.getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+const fail = (tx, msg) => { try { tx.abort(); } catch {} const e = new Error(msg); e.name = 'RosterError'; return e; };
+
+async function listMembers(db) {
+  const tx = db.transaction('members'), q = all(tx.objectStore('members')); const p = done(tx);
+  const r = await q; await p; return r;
+}
+
+// opts: { now, id, allowDuplicate }。同姓同名は allowDuplicate が true のときだけ別人として追加できる
+async function addMember(db, fields, opts = {}) {
+  const now = opts.now ?? Date.now(), v = validateFields(fields);
+  if (!v.ok) throw new Error(v.errors.join(' / '));
+  const tx = db.transaction('members', 'readwrite'), st = tx.objectStore('members'), p = done(tx);
+  p.catch(() => {});
+  const cur = await all(st);
+  if (!opts.allowDuplicate && cur.some(m => nameKey(m.name) === nameKey(v.value.name))) throw fail(tx, '同じ氏名の部員がすでにいます');
+  const id = opts.id || makeId();
+  if (cur.some(m => m.id === id)) throw fail(tx, '部員IDが重複しました');
+  const m = newMember(fields, { id, now, sortOrder: nextSortOrder(cur) });
+  st.put(m); await p; return m;
+}
+
+async function updateMember(db, id, fields, opts = {}) {
+  const now = opts.now ?? Date.now(), v = validateFields(fields);
+  if (!v.ok) throw new Error(v.errors.join(' / '));
+  const tx = db.transaction('members', 'readwrite'), st = tx.objectStore('members'), p = done(tx); p.catch(() => {});
+  const cur = await get(st, id);
+  if (!cur) throw fail(tx, '部員が見つかりません');
+  const m = { ...cur, ...v.value, updatedAt: now }; // IDは変えない
+  st.put(m); await p; return m;
+}
+
+async function setHidden(db, id, reason, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const tx = db.transaction('members', 'readwrite'), st = tx.objectStore('members'), p = done(tx); p.catch(() => {});
+  const cur = await get(st, id);
+  if (!cur) throw fail(tx, '部員が見つかりません');
+  if (cur.status === 'hidden') throw fail(tx, 'すでに非表示です');
+  const m = hideMember(cur, reason, now); st.put(m); await p; return m;
+}
+
+async function setShown(db, id, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const tx = db.transaction('members', 'readwrite'), st = tx.objectStore('members'), p = done(tx); p.catch(() => {});
+  const cur = await get(st, id);
+  if (!cur) throw fail(tx, '部員が見つかりません');
+  if (cur.status === 'active') throw fail(tx, 'すでに表示中です');
+  const m = showMember(cur, now, nextSortOrder(await all(st))); // 名簿の末尾に戻す
+  st.put(m); await p; return m;
+}
+
+// dir: -1=上へ, +1=下へ。有効部員の順序を 0..n-1 に振り直して入れ替える（単一トランザクション）
+async function moveMember(db, id, dir, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const tx = db.transaction('members', 'readwrite'), st = tx.objectStore('members'), p = done(tx); p.catch(() => {});
+  const act = sortActive(await all(st)), i = act.findIndex(m => m.id === id), j = i + dir;
+  if (i < 0) throw fail(tx, '表示中の部員が見つかりません');
+  if (j < 0 || j >= act.length) { tx.abort(); return false; }
+  [act[i], act[j]] = [act[j], act[i]];
+  act.forEach((m, k) => { if (m.sortOrder !== k || m.id === act[i].id || m.id === act[j].id) st.put({ ...m, sortOrder: k, updatedAt: m.sortOrder === k ? m.updatedAt : now }); });
+  await p; return true;
+}
+
+// CSV取り込みの一括反映。全件を単一トランザクションで適用し、1件でも不正なら全件を戻す
+// ops: { adds:[{name,kana,grade}], updates:[{id,name,kana,grade}] }
+async function applyImport(db, ops, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const tx = db.transaction('members', 'readwrite'), st = tx.objectStore('members'), p = done(tx); p.catch(() => {});
+  const cur = await all(st), byId = new Map(cur.map(m => [m.id, m])), seen = new Set();
+  const out = [];
+  for (const u of ops.updates || []) {
+    const old = byId.get(u.id);
+    if (!old) throw fail(tx, `存在しない部員IDです: ${u.id}`);
+    if (seen.has(u.id)) throw fail(tx, `部員IDが重複しています: ${u.id}`);
+    seen.add(u.id);
+    const v = validateFields(u); if (!v.ok) throw fail(tx, v.errors.join(' / '));
+    out.push({ ...old, ...v.value, updatedAt: now });
+  }
+  let order = nextSortOrder(cur);
+  for (const a of ops.adds || []) {
+    let id; do { id = makeId(); } while (byId.has(id) || seen.has(id));
+    seen.add(id);
+    const v = validateFields(a); if (!v.ok) throw fail(tx, v.errors.join(' / '));
+    out.push(newMember(a, { id, now, sortOrder: order++ }));
+  }
+  for (const m of out) { const r = validateMember(m); if (!r.ok) throw fail(tx, r.errors.join(' / ')); st.put(m); }
+  await p; return { added: (ops.adds || []).length, updated: (ops.updates || []).length };
+}
+
+// ---- csv.js ----
+// CSVの文字コード判定・解析・取り込み計画・書き出し（純粋関数）
+class CsvError extends Error { constructor(code, message) { super(message); this.name = 'CsvError'; this.code = code; } }
+
+const u8 = b => b instanceof Uint8Array ? b : new Uint8Array(b);
+// UTF-8 BOMあり→UTF-8（不正ならエラー）／BOMなし→厳密UTF-8、だめならShift_JIS（置換文字が出たらエラー）
+function decodeCsv(bytes, TD = globalThis.TextDecoder) {
+  const b = u8(bytes);
+  if (b.length >= 2 && ((b[0] === 0xFF && b[1] === 0xFE) || (b[0] === 0xFE && b[1] === 0xFF))) throw new CsvError('utf16', 'UTF-16 のファイルには対応していません。UTF-8 または Shift_JIS で保存し直してください');
+  const strict = new TD('utf-8', { fatal: true, ignoreBOM: true });
+  if (b.length >= 3 && b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF) {
+    try { return { text: strict.decode(b.subarray(3)), encoding: 'utf-8-bom' }; } catch { throw new CsvError('invalid_utf8', 'BOM付きUTF-8として読めませんでした（文字コードが壊れています）'); }
+  }
+  try { return { text: strict.decode(b), encoding: 'utf-8' }; } catch {}
+  try {
+    const t = new TD('shift_jis', { fatal: true }).decode(b);
+    if (t.includes('\uFFFD')) throw 0;
+    return { text: t, encoding: 'shift_jis' };
+  } catch { throw new CsvError('unknown_encoding', '文字コードを判定できませんでした（UTF-8 または Shift_JIS で保存してください）'); }
+}
+
+// RFC4180相当。引用符・"" ・CRLF/LF/CR・セル内改行。空行は読み飛ばす
+function parseCsv(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const rows = []; let row = [], f = '', q = false, i = 0, any = false;
+  const endField = () => { row.push(f); f = ''; };
+  const endRow = () => { endField(); if (!(row.length === 1 && row[0] === '' && !any)) rows.push(row); row = []; any = false; };
+  while (i < text.length) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { f += '"'; i += 2; continue; } q = false; i++; continue; }
+      f += c; i++; continue;
+    }
+    if (c === '"' && f === '' ) { q = true; any = true; i++; continue; }
+    if (c === '"') throw new CsvError('bad_quote', `引用符の位置が不正です（${rows.length + 1}行目付近）`);
+    if (c === ',') { endField(); any = true; i++; continue; }
+    if (c === '\r') { endRow(); i += text[i + 1] === '\n' ? 2 : 1; continue; }
+    if (c === '\n') { endRow(); i++; continue; }
+    f += c; any = true; i++;
+  }
+  if (q) throw new CsvError('unterminated_quote', '引用符が閉じられていません');
+  if (f !== '' || row.length || any) endRow();
+  return rows;
+}
+
+// 数式インジェクション対策: 書き出し時に先頭へ ' を付け、取り込み時に1つだけ外す
+const guardFormula = s => isDangerousLead(s) ? "'" + s : s;
+const unguardFormula = s => /^'[=+\-@\t\r]/.test(s) ? s.slice(1) : s;
+
+const HEADERS = { id: '部員ID', name: '氏名', kana: 'ふりがな', grade: '学年' };
+// 取り込み計画。kind: new / update / unchanged / dup_name / error。既定の action: new→add、それ以外→skip（updateは明示選択）
+function buildPlan(rows, existing) {
+  if (!rows.length) throw new CsvError('empty', 'CSVが空です');
+  const head = rows[0].map(h => cleanText(unguardFormula(h)));
+  const col = {};
+  for (const k of Object.keys(HEADERS)) {
+    const idx = head.reduce((a, h, i) => h === HEADERS[k] ? a.concat(i) : a, []);
+    if (idx.length > 1) throw new CsvError('dup_header', `見出し「${HEADERS[k]}」が重複しています`);
+    col[k] = idx.length ? idx[0] : -1;
+  }
+  if (col.name < 0) throw new CsvError('no_name_header', '見出し行に「氏名」がありません');
+  const byId = new Map(existing.map(m => [m.id, m])), idCount = new Map();
+  const cell = (r, k) => col[k] < 0 ? '' : unguardFormula(r[col[k]] == null ? '' : r[col[k]]);
+  const data = rows.slice(1).map((r, n) => ({ line: n + 2, id: cleanText(cell(r, 'id')), raw: r }));
+  for (const d of data) if (d.id) idCount.set(d.id, (idCount.get(d.id) || 0) + 1);
+  const exKeys = new Map(); for (const m of existing) exKeys.set(nameKey(m.name), m);
+  const newKeys = new Set();
+  const out = data.map(d => {
+    const base = { line: d.line, id: d.id, messages: [] };
+    const f = validateFields({ name: cell(d.raw, 'name'), kana: cell(d.raw, 'kana'), grade: cell(d.raw, 'grade') });
+    const wrongGrade = f.errors.some(e => e.startsWith('学年'));
+    if (!f.ok) return { ...base, kind: 'error', action: 'none', data: f.value, messages: f.errors };
+    const v = f.value;
+    if (d.id) {
+      if (d.id.includes(':')) return { ...base, kind: 'error', action: 'none', data: v, messages: ['部員IDに使えない文字（:）があります'] };
+      if (idCount.get(d.id) > 1) return { ...base, kind: 'error', action: 'none', data: v, messages: ['CSV内で同じ部員IDが重複しています'] };
+      const ex = byId.get(d.id);
+      if (!ex) return { ...base, kind: 'error', action: 'none', data: v, messages: ['この部員IDは名簿にありません（IDを空にすると新規候補になります）'] };
+      const changes = ['name', 'kana', 'grade'].filter(k => (ex[k] ?? (k === 'grade' ? null : '')) !== v[k]).map(k => ({ field: k, from: ex[k] ?? '', to: v[k] ?? '' }));
+      return changes.length ? { ...base, kind: 'update', action: 'skip', data: v, existing: ex, changes } : { ...base, kind: 'unchanged', action: 'skip', data: v, existing: ex, changes: [] };
+    }
+    const key = nameKey(v.name), hit = exKeys.get(key);
+    if (hit || newKeys.has(key)) { newKeys.add(key); return { ...base, kind: 'dup_name', action: 'skip', data: v, existing: hit || null, messages: [hit ? (hit.status === 'hidden' ? '同じ氏名の非表示部員がいます' : '同じ氏名の部員がいます') : 'CSV内に同じ氏名の行があります'] }; }
+    newKeys.add(key);
+    return { ...base, kind: 'new', action: 'add', data: v };
   });
-  return done(tx);
+  const counts = out.reduce((a, r) => (a[r.kind] = (a[r.kind] || 0) + 1, a), {});
+  return { rows: out, errorCount: counts.error || 0, counts, hasEncodingWarning: false };
 }
 
-window.__booted = true;
-
-
-
-
-const MEMBERS = ['青木', '伊藤', '上田', '江口', '小野', '加藤'].map((n, i) => ({ id: 't' + (i + 1), name: n })); // テスト名簿
-const $ = id => document.getElementById(id);
-let flip = false, half = VIEW_HALF;
-try { flip = localStorage.getItem('flip') === '1'; half = +localStorage.getItem('half') || VIEW_HALF; } catch {}
-const view = () => ({ half, flip });
-const say = (t, warn) => { $('msg').textContent = t; $('msg').className = warn ? 'warn' : ''; };
-const info = r => !r ? { t: '未入力', s: '－' } : r.status === 'unlocated_miss' ? { t: '位置不明の外れ', s: '？' } : isHit(r.x, r.y) ? { t: '的中', s: '○' } : { t: '外れ', s: '×' };
-
-// iPadにはデバッグ画面がないため、想定外のエラーも画面に出す
-addEventListener('error', e => say(`エラー: ${e.message}`, true));
-addEventListener('unhandledrejection', e => say(`エラー: ${e.reason && e.reason.message || e.reason}`, true));
-let saveState = 'pending', saveReason = '', unsaved = new Set(), seq = 0, okSeq = 0, savedJson = ''; // 保存状態: pending / ok / unavailable
-let db = null, dbPending = true; // 保存領域の準備が終わるまでは記録しない（読み込み前の入力を上書きしないため）
-const store = createStore(MEMBERS);
-store.subscribe(render);
-store.subscribe((s, dirty) => { if (dirty) persist(s); });
-// 保存結果は最新の保存だけを反映する。失敗時は、保存済みの内容との差分の射を「未保存」にする
-const keyDiff = (a, b) => { const A = JSON.parse(a || '{}'), B = JSON.parse(b), out = new Set(); for (const id in B) B[id].forEach((r, i) => { if (JSON.stringify(r) !== JSON.stringify(A[id] && A[id][i])) out.add(`${id}:${i}`); }); return out; };
-function persist(s) {
-  if (!db) return;
-  const mine = ++seq, snap = JSON.stringify(s.records);
-  saveShots(db, s.records).then(() => { if (mine > okSeq) { okSeq = mine; savedJson = snap; } if (mine === seq) unsaved = new Set(); render(); },
-    () => { if (mine === seq) { unsaved = keyDiff(savedJson, snap); say('保存に失敗しました。未保存の射に印を付けています', true); } render(); });
+// choices: Map/obj  line→'add'|'update'|'skip'。エラー行が1つでもあれば取り込めない
+function selectOps(plan, choices = {}) {
+  if (plan.errorCount) throw new CsvError('has_errors', `エラー行が${plan.errorCount}件あるため取り込めません。CSVを直してもう一度選んでください`);
+  const get = r => (choices instanceof Map ? choices.get(r.line) : choices[r.line]) ?? r.action;
+  const adds = [], updates = [];
+  for (const r of plan.rows) {
+    const a = get(r);
+    if (a === 'add' && (r.kind === 'new' || r.kind === 'dup_name')) adds.push(r.data);
+    else if (a === 'update' && r.kind === 'update') updates.push({ id: r.id, ...r.data });
+  }
+  return { adds, updates };
 }
 
-function drawTarget(arr, sel) {
-  const H = half, X = x => flip ? -x : x, u = H / 20, svg = $('target');
-  const dash = `fill="none" stroke="#8a94a0" stroke-width="${u / 12}" stroke-dasharray="${u / 3} ${u / 3}"`;
-  let g = `<rect x="${-H}" y="${-H}" width="${2 * H}" height="${2 * H}" fill="#e9edf1"/>
-    <path d="M${-H} 0H${H}M0 ${-H}V${H}" stroke="#b7c0c9" stroke-width="${u / 8}"/>
-    <circle r="1" fill="#fff" stroke="#1d2733" stroke-width="${u / 3}"/><circle r=".5" fill="none" stroke="#c4ccd4" stroke-width="${u / 8}"/>
-    <circle r=".9" ${dash}/><circle r="1.1" ${dash}/>`;
-  const lab = (x, y, t) => `<text x="${X(x)}" y="${y}" font-size="${u * 1.5}" fill="#4b5663" text-anchor="middle" dominant-baseline="middle">${t}</text>`;
-  g += lab(0, -H * .9, '上') + lab(0, H * .9, '下') + lab(-H * .9, 0, '左') + lab(H * .9, 0, '右'); // 保存座標の向きで配置（反転時は画面上で左右が入れ替わる）
-  arr.forEach((r, i) => {
-    if (!r || r.status !== 'located') return; // 位置不明の外れは的の上に出さない
-    const x = X(r.x), y = r.y, c = isHit(r.x, r.y) ? '#0b6bcb' : '#c4271d';
-    if (isNearBoundary(r.x, r.y)) g += `<circle cx="${x}" cy="${y}" r="${u * 1.6}" fill="none" stroke="#1d2733" stroke-width="${u / 6}" stroke-dasharray="${u / 3} ${u / 4}"/>`;
-    if (i === sel) g += `<circle cx="${x}" cy="${y}" r="${u * 2.1}" fill="none" stroke="#f0a000" stroke-width="${u / 2.5}"/>`;
-    g += isHit(r.x, r.y)
-      ? `<circle cx="${x}" cy="${y}" r="${u}" fill="${c}" stroke="#fff" stroke-width="${u / 4}"/>`
-      : `<path d="M${x - u} ${y - u}L${x + u} ${y + u}M${x - u} ${y + u}L${x + u} ${y - u}" stroke="#fff" stroke-width="${u * .85}" stroke-linecap="round"/><path d="M${x - u} ${y - u}L${x + u} ${y + u}M${x - u} ${y + u}L${x + u} ${y - u}" stroke="${c}" stroke-width="${u * .45}" stroke-linecap="round"/>`;
-    g += `<text x="${x}" y="${y - u * 2.7}" font-size="${u * 1.7}" font-weight="700" fill="#1d2733" text-anchor="middle" stroke="#fff" stroke-width="${u / 3}" paint-order="stroke">${i + 1}</text>`;
-  });
-  svg.setAttribute('viewBox', `${-H} ${-H} ${2 * H} ${2 * H}`);
-  svg.innerHTML = g;
+const q = s => /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+const cellOut = v => q(guardFormula(v == null ? '' : String(v)));
+// UTF-8 BOM付き・CRLF（Excelでそのまま開ける）。既定は有効部員のみ
+function toCsv(members, { includeHidden = false } = {}) {
+  const list = sortActive(members.slice()).concat(includeHidden ? sortHidden(members.slice()) : []);
+  const lines = [[HEADERS.id, HEADERS.name, HEADERS.kana, HEADERS.grade].join(',')];
+  for (const m of list) lines.push([cellOut(m.id), cellOut(m.name), cellOut(m.kana), cellOut(m.grade)].join(','));
+  return '\uFEFF' + lines.join('\r\n') + '\r\n';
 }
 
-function render() {
-  const s = store.state, last = s.members.length - 1, m = s.members[s.mi], arr = s.records[m.id], st = statsOf(arr), all = totalStats(s.records);
-  $('who').textContent = `${m.name}（${s.mi + 1}/${s.members.length}人目）`;
-  $('now').textContent = s.sel == null ? '4射とも入力済み' : `${s.sel + 1}射目を${arr[s.sel] ? '修正' : '入力'}中`;
-  $('now').className = s.sel == null ? 'done' : '';
-  drawTarget(arr, s.sel);
-  $('chips').innerHTML = arr.map((r, i) => {
-    const f = info(r), near = r && r.status === 'located' && isNearBoundary(r.x, r.y), key = m.id + ':' + i, uns = r ? (saveState === 'unavailable' || unsaved.has(key)) : unsaved.has(key);
-    return `<button data-i="${i}" class="chip${i === s.sel ? ' sel' : ''}"><b>${i + 1}射目</b><span class="sym">${f.s}</span><span>${f.t}</span>${near ? '<small>境界付近</small>' : ''}${uns ? `<small class="uns">${r ? '未保存' : '削除が未保存'}</small>` : ''}</button>`;
-  }).join('');
-  $('unloc').disabled = s.sel == null; $('del').disabled = s.sel == null || !arr[s.sel]; $('undo').disabled = !store.canUndo();
-  $('prev').disabled = s.mi === 0; $('next').disabled = s.mi === last;
-  $('next').textContent = s.mi === last ? '最後の部員です' : '次の部員へ ▶';
-  $('jump').innerHTML = s.members.map((x, k) => `<option value="${k}"${k === s.mi ? ' selected' : ''}>${s.records[x.id].every(Boolean) ? '✓ ' : ''}${x.name}</option>`).join('');
-  $('stats').textContent = `${m.name}：記録${st.recorded}射中${st.hits}中　／　全体：記録${all.recorded}射中${all.hits}中` + (all.recorded ? `（${(all.hits / all.recorded * 100).toFixed(1)}%）` : '');
-  const T = { pending: ['保存準備中', ''], ok: unsaved.size ? [`未保存 ${unsaved.size}件（保存に失敗）`, 'bad'] : ['保存可能', 'ok'], unavailable: ['未保存（保存できません）', 'bad'] }[saveState];
-  $('save').textContent = T[0]; $('save').className = T[1]; $('save').title = saveReason;
-  $('flip').checked = flip; $('half').value = String(half);
+// ---- roster-view.js ----
+// 部員管理画面。氏名などの利用者入力はすべて textContent / value で扱い、innerHTML には入れない
+function createRosterView({ doc, root, ops, getState }) {
+  const st = { editing: null, hiding: null, msg: null, plan: null, choices: {}, busy: false, includeHiddenExport: false };
+  const h = (tag, attrs, ...kids) => {
+    const e = doc.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === 'class') e.className = v; else if (k === 'text') e.textContent = v; else if (k.startsWith('on')) e[k] = v; else if (v === true) e.setAttribute(k, ''); else if (v !== false && v != null) e.setAttribute(k, v);
+    }
+    for (const c of kids.flat()) if (c != null) e.append(c.nodeType ? c : doc.createTextNode(String(c)));
+    return e;
+  };
+  const say = (text, kind) => { st.msg = text ? { text, kind } : null; };
+  const fmt = ms => { const d = new Date(ms); return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`; };
+  const gradeText = g => g ? `${g}年` : '学年未設定';
+  async function run(fn, okText) {
+    if (st.busy) return; st.busy = true; render();
+    try { const r = await fn(); say(okText ? (typeof okText === 'function' ? okText(r) : okText) : '', 'ok'); }
+    catch (e) { say(e && e.message || String(e), 'err'); }
+    st.busy = false; render();
+  }
+  const gradeSelect = (id, val) => h('select', { id }, [['', '未設定'], [1, '1年'], [2, '2年'], [3, '3年']].map(([v, t]) => h('option', { value: v, selected: String(val ?? '') === String(v) }, t)));
+  const fieldBox = (label, input) => h('label', { class: 'fld' }, h('span', { text: label }), input);
+
+  function addCard(canEdit) {
+    const name = h('input', { id: 'addName', type: 'text', maxlength: 40, autocomplete: 'off' }), kana = h('input', { id: 'addKana', type: 'text', maxlength: 80, autocomplete: 'off' });
+    const grade = gradeSelect('addGrade', ''), dup = h('input', { id: 'addDup', type: 'checkbox' });
+    return h('div', { class: 'card' }, h('h2', { text: '部員を追加' }),
+      h('div', { class: 'frm' }, fieldBox('氏名（必須）', name), fieldBox('ふりがな', kana), fieldBox('学年', grade)),
+      h('label', {}, dup, '同姓同名でも別人として追加する'),
+      h('div', { class: 'btns' }, h('button', { id: 'addBtn', disabled: !canEdit || st.busy, onclick: () => run(async () => { await ops.add({ name: name.value, kana: kana.value, grade: grade.value }, dup.checked); }, '追加しました') }, '追加')));
+  }
+
+  function activeCard(list, canEdit) {
+    const card = h('div', { class: 'card', id: 'activeCard' }, h('h2', { text: `部員名簿（表示中 ${list.length}人）` }));
+    if (!list.length) card.append(h('div', { class: 'note', text: '表示中の部員がいません。上のフォームか、CSVで登録してください。' }));
+    list.forEach((m, i) => {
+      const row = h('div', { class: 'mrow', 'data-id': m.id });
+      if (st.editing === m.id) {
+        const n = h('input', { type: 'text', value: m.name, maxlength: 40, class: 'eName' }), k = h('input', { type: 'text', value: m.kana || '', maxlength: 80, class: 'eKana' }), g = gradeSelect('', m.grade);
+        g.className = 'eGrade';
+        row.append(h('div', { class: 'frm' }, fieldBox('氏名', n), fieldBox('ふりがな', k), fieldBox('学年', g)),
+          h('div', { class: 'btns' }, h('button', { class: 'eSave', disabled: st.busy, onclick: () => run(async () => { await ops.update(m.id, { name: n.value, kana: k.value, grade: g.value }); st.editing = null; }, '保存しました') }, '保存'), h('button', { onclick: () => { st.editing = null; say(''); render(); } }, 'キャンセル')));
+      } else if (st.hiding === m.id) {
+        const sel = h('select', { class: 'hReason' }, HIDDEN_REASONS.map(r => h('option', { value: r }, r)));
+        row.append(h('div', {}, h('div', { class: 'nm', text: m.name }), h('small', { text: '非表示にする理由' }), sel),
+          h('div', { class: 'btns' }, h('button', { class: 'hOk', disabled: st.busy, onclick: () => run(async () => { await ops.hide(m.id, sel.value); st.hiding = null; }, '非表示にしました（記録は残ります）') }, '非表示にする'), h('button', { onclick: () => { st.hiding = null; render(); } }, 'キャンセル')));
+      } else {
+        row.append(h('div', {}, h('div', { class: 'nm', text: `${i + 1}. ${m.name}` }), h('small', { text: `${m.kana || 'ふりがな未設定'}　${gradeText(m.grade)}` })),
+          h('div', { class: 'btns' },
+            h('button', { class: 'up', 'aria-label': '上へ', disabled: !canEdit || st.busy || i === 0, onclick: () => run(() => ops.move(m.id, -1)) }, '↑'),
+            h('button', { class: 'down', 'aria-label': '下へ', disabled: !canEdit || st.busy || i === list.length - 1, onclick: () => run(() => ops.move(m.id, 1)) }, '↓'),
+            h('button', { class: 'edit', disabled: !canEdit || st.busy, onclick: () => { st.editing = m.id; st.hiding = null; say(''); render(); } }, '編集'),
+            h('button', { class: 'hide', disabled: !canEdit || st.busy, onclick: () => { st.hiding = m.id; st.editing = null; say(''); render(); } }, '非表示')));
+      }
+      card.append(row);
+    });
+    return card;
+  }
+
+  function hiddenCard(list, canEdit) {
+    if (!list.length) return null;
+    const card = h('div', { class: 'card', id: 'hiddenCard' }, h('h2', { text: `非表示の部員（${list.length}人）` }), h('div', { class: 'note', text: '非表示でも過去の記録は残っています。再表示すると名簿の末尾に戻り、記録も復元されます。' }));
+    for (const m of list) card.append(h('div', { class: 'mrow', 'data-id': m.id },
+      h('div', {}, h('div', { class: 'nm', text: m.name }), h('small', { text: `${m.hiddenReason || ''}（${m.hiddenAt ? fmt(m.hiddenAt) : ''}）` })),
+      h('div', { class: 'btns' }, h('button', { class: 'show', disabled: !canEdit || st.busy, onclick: () => run(() => ops.show(m.id), '再表示しました（名簿の末尾）') }, '再表示'))));
+    return card;
+  }
+
+  const KIND = { new: '新規', update: '更新候補', unchanged: '変更なし', dup_name: '同名', error: 'エラー' };
+  function csvCard(canEdit) {
+    const card = h('div', { class: 'card', id: 'csvCard' }, h('h2', { text: 'CSV' }));
+    const file = h('input', { type: 'file', id: 'csvFile', accept: '.csv,.txt,text/csv', disabled: !canEdit || st.busy });
+    file.onchange = () => { const f = file.files && file.files[0]; if (!f) return; run(async () => { st.plan = await ops.importPreview(f); st.choices = {}; }, r => ''); };
+    card.append(h('div', { class: 'note', text: '列: 部員ID・氏名（必須）・ふりがな・学年。IDが空なら新規候補、IDが名簿と一致すれば更新候補です。文字コードは UTF-8（BOMあり・なし）と Shift_JIS に対応しています。' }), h('label', { class: 'fld' }, h('span', { text: 'CSVファイルを選ぶ' }), file));
+    if (st.plan) {
+      const p = st.plan;
+      card.append(h('div', { class: p.errorCount ? 'err' : 'note', id: 'planSummary', text: `${p.rows.length}行を読み込みました（文字コード: ${p.encoding || '不明'}）。` + Object.entries(p.counts).map(([k, v]) => `${KIND[k]}${v}`).join('・') + (p.errorCount ? '　エラー行があるため取り込めません。CSVを直して選び直してください。' : '') }));
+      const t = h('table', { class: 'prev' }, h('tr', {}, ['行', '判定', '氏名', 'ふりがな', '学年', '内容', '操作'].map(x => h('th', { text: x }))));
+      for (const r of p.rows) {
+        let op = '';
+        const opts = r.kind === 'new' ? [['add', '追加する'], ['skip', '追加しない']] : r.kind === 'update' ? [['skip', '更新しない'], ['update', '更新する']] : r.kind === 'dup_name' ? [['skip', 'スキップ'], ['add', '別人として追加']] : null;
+        if (opts) { op = h('select', { class: 'op', 'data-line': r.line, onchange: e => { st.choices[r.line] = e.target.value; } }, opts.map(([v, tx]) => h('option', { value: v, selected: (st.choices[r.line] ?? r.action) === v }, tx))); }
+        const note = r.kind === 'update' ? r.changes.map(c => `${{ name: '氏名', kana: 'ふりがな', grade: '学年' }[c.field]}: ${c.from === '' ? '（空）' : c.from} → ${c.to === '' ? '（空）' : c.to}`).join(' / ') : (r.messages || []).join(' / ');
+        t.append(h('tr', { class: r.kind }, h('td', { text: r.line }), h('td', { text: KIND[r.kind] }), h('td', { text: r.data.name }), h('td', { text: r.data.kana }), h('td', { text: r.data.grade ? `${r.data.grade}年` : '' }), h('td', { text: note }), h('td', {}, op)));
+      }
+      card.append(h('div', { style: 'overflow-x:auto' }, t),
+        h('div', { class: 'btns' }, h('button', { id: 'csvApply', disabled: !canEdit || st.busy || p.errorCount > 0, onclick: () => run(() => ops.importApply(p, st.choices).then(r => { st.plan = null; st.choices = {}; return r; }), r => `取り込みました（追加${r.added}件・更新${r.updated}件）`) }, '取り込む'), h('button', { onclick: () => { st.plan = null; st.choices = {}; render(); } }, '取り消す')));
+    }
+    const inc = h('input', { type: 'checkbox', id: 'expHidden', checked: st.includeHiddenExport, onchange: e => { st.includeHiddenExport = e.target.checked; } });
+    card.append(h('div', { class: 'btns' }, h('button', { id: 'csvExport', disabled: !canEdit || st.busy, onclick: () => run(async () => { ops.exportCsv(st.includeHiddenExport); }, 'CSVを書き出しました') }, 'CSVを書き出す'), h('label', {}, inc, '非表示の部員も含める')));
+    return card;
+  }
+
+  function render() {
+    const s = getState(), canEdit = s.canEdit && !s.syncing;
+    root.replaceChildren();
+    if (!s.canEdit) root.append(h('div', { class: 'card err', id: 'rosterDisabled', text: s.reason || '保存領域を使えないため、部員管理は表示のみです' }));
+    if (st.msg) root.append(h('div', { class: st.msg.kind === 'err' ? 'err' : 'okmsg', id: 'rosterMsg', role: 'status', text: st.msg.text }));
+    root.append(addCard(canEdit), activeCard(sortActive(s.members.slice()), canEdit));
+    const hc = hiddenCard(sortHidden(s.members.slice()), canEdit); if (hc) root.append(hc);
+    root.append(csvCard(canEdit));
+  }
+  return { render, state: st };
 }
 
-let drag = null;
-const apply = e => { const w = pointToWorld(e.clientX, e.clientY, $('target').getBoundingClientRect(), view()); const r = store.place(drag.i, w.x, w.y); if (!r.ok) say(r.reason, true); return r.ok; };
-const target = $('target');
-target.addEventListener('pointerdown', e => {
-  if (dbPending) return say('保存領域を準備中です。少しお待ちください', true);
-  const s = store.state; if (s.sel == null) return say('4射とも入力済みです。修正する射の番号を選んでください', true);
-  e.preventDefault(); target.setPointerCapture(e.pointerId);
-  drag = { i: s.sel, before: store.snap() }; apply(e);
-});
-target.addEventListener('pointermove', e => { if (drag) apply(e); });
-target.addEventListener('pointerup', () => {
-  if (!drag) return; const { i, before } = drag; drag = null; store.settle(before);
-  const f = info(store.state.records[store.state.members[store.state.mi].id][i]);
-  say(`${i + 1}射目：${f.t}`);
-});
-target.addEventListener('pointercancel', () => { if (drag) { store.restore(drag.before); drag = null; } });
-$('chips').onclick = e => { const b = e.target.closest('button'); if (b) { store.select(+b.dataset.i); say(''); } };
-$('unloc').onclick = () => { const i = store.state.sel; store.unlocated(i); say(`${i + 1}射目：位置不明の外れ`); };
-$('del').onclick = () => { const i = store.state.sel; store.remove(i); say(`${i + 1}射目を削除しました（取り消しで戻せます）`); };
-$('undo').onclick = () => { store.undo(); say('直前の操作を取り消しました'); };
-$('prev').onclick = () => { store.prev(); say(''); };
-$('next').onclick = () => { store.next(); say(store.state.mi === store.state.members.length - 1 ? '最後の部員です' : ''); };
-$('jump').onchange = e => { store.goto(+e.target.value); say(''); };
-$('flip').onchange = e => { flip = e.target.checked; try { localStorage.setItem('flip', flip ? '1' : '0'); } catch {} render(); };
-$('half').onchange = e => { half = +e.target.value; try { localStorage.setItem('half', half); } catch {} render(); };
-render();
-
-// 画面の描画とボタン登録を先に済ませ、IndexedDBは後から非同期で準備する（応答しなくても画面は動く）
+// ---- app.js ----
 // 4秒を超えて遅れて開いた接続は閉じ、保存可能な状態には戻さない（未保存のまま）
 const withTimeout = (p, ms, onLate) => new Promise((res, rej) => {
   let late = false; const t = setTimeout(() => { late = true; rej(new Error('応答がありません')); }, ms);
   p.then(v => { if (late) { if (onLate) onLate(v); } else { clearTimeout(t); res(v); } }, e => { if (!late) { clearTimeout(t); rej(e); } });
 });
-(async () => {
-  let d = null;
-  try {
-    d = await withTimeout(openDb(), 4000, late => late.close());
-    const saved = await withTimeout(loadShots(d), 4000), recs = {};
-    for (const m of MEMBERS) recs[m.id] = saved[m.id] || Array(SHOTS).fill(null);
-    const k = recs[MEMBERS[0].id].indexOf(null);
-    store.restore({ records: recs, mi: 0, sel: k < 0 ? null : k });
-    savedJson = JSON.stringify(store.state.records); db = d; saveState = 'ok'; say('');
-  } catch (e) {
-    if (d) { try { d.close(); } catch {} }
-    saveState = 'unavailable'; saveReason = `${e && e.name || ''} ${e && e.message || ''}`.trim() || '原因不明';
-    say(`保存領域を使えません（${saveReason}）。記録は一時的で、画面を閉じると消えます`, true);
+// 保存結果は最新の保存だけを反映する。失敗時は、保存済みの内容との差分の射を「未保存」にする
+const keyDiff = (a, b) => { const A = JSON.parse(a || '{}'), B = JSON.parse(b), out = new Set(); for (const id in B) B[id].forEach((r, i) => { if (JSON.stringify(r) !== JSON.stringify(A[id] && A[id][i])) out.add(`${id}:${i}`); }); return out; };
+// 最後に保存成功した状態と差分がある部員のID（保存対象の部員IDの決め方）
+const changedMembers = (a, b) => { const A = JSON.parse(a || '{}'), B = JSON.parse(b), out = []; for (const id in B) if (JSON.stringify(B[id]) !== JSON.stringify(A[id] || Array(SHOTS).fill(null))) out.push(id); return out; };
+// 別タブがDBのバージョンを更新（versionchange）した後に表示する案内
+const LOCK_MSG = '別のタブで保存領域が更新されました。ページを再読み込みしてください。再読み込みするまで記録・部員管理は利用できません';
+const info = r => !r ? { t: '未入力', s: '－' } : r.status === 'unlocated_miss' ? { t: '位置不明の外れ', s: '？' } : isHit(r.x, r.y) ? { t: '的中', s: '○' } : { t: '外れ', s: '×' };
+
+// env はテスト用の差し替え口（既定はブラウザの実物）
+function startApp(env = {}) {
+  const doc = env.doc || document, win = env.win || window, idb = env.idb || globalThis.indexedDB, timeoutMs = env.timeoutMs ?? 4000;
+  const ls = env.ls !== undefined ? env.ls : (() => { try { return win.localStorage; } catch { return null; } })();
+  const $ = id => doc.getElementById(id);
+  win.__booted = true;
+  let flip = false, half = VIEW_HALF;
+  try { flip = ls.getItem('flip') === '1'; half = +ls.getItem('half') || VIEW_HALF; } catch {}
+  const setLs = (k, v) => { try { ls.setItem(k, v); } catch {} };
+  const view = () => ({ half, flip });
+  const say = (t, warn) => { $('msg').textContent = t; $('msg').className = warn ? 'warn' : ''; };
+  // iPadにはデバッグ画面がないため、想定外のエラーも画面に出す
+  win.addEventListener('error', e => say(`エラー: ${e.message}`, true));
+  win.addEventListener('unhandledrejection', e => say(`エラー: ${e.reason && e.reason.message || e.reason}`, true));
+
+  let roster = [];                 // DBの全部員（非表示を含む）
+  let activeMembers = [], store = null, curSig = ''; // Storeに渡した有効部員と、その構成（有効部員IDの並び）
+  let saveState = 'pending', saveReason = '', unsaved = new Set(), seq = 0, okSeq = 0, savedJson = ''; // 保存状態: pending / ok / unavailable
+  let db = null, dbPending = true, syncing = false, deferred = false, blocked = false, locked = false, tab = 'rec'; // locked: versionchange後。この画面は保存できないため、記録・部員管理を禁止する
+  const inflight = new Set();
+
+  function makeStore(members, init) {
+    const s = createStore(members, init);
+    s.subscribe(render);
+    s.subscribe((st, dirty) => { if (dirty) persist(st); });
+    return s;
   }
-  dbPending = false; render();
-})();
+  // 部員単位の保存: 最後に保存成功した状態と差分のある部員の射だけを置き換える
+  function persist(s) {
+    if (!db) return;
+    const snap = JSON.stringify(s.records), targets = changedMembers(savedJson, snap);
+    if (!targets.length) return;
+    const mine = ++seq, byMember = {};
+    for (const id of targets) byMember[id] = s.records[id];
+    const p = saveMemberShots(db, byMember).then(() => { if (mine > okSeq) { okSeq = mine; savedJson = snap; } if (mine === seq) unsaved = new Set(); render(); },
+      () => { if (mine === seq) { unsaved = keyDiff(savedJson, snap); say('保存に失敗しました。未保存の射に印を付けています', true); } render(); });
+    inflight.add(p); p.then(() => inflight.delete(p));
+  }
+  const unsavedNow = () => !!store && (unsaved.size > 0 || savedJson !== JSON.stringify(store.state.records));
+
+  function drawTarget(arr, sel) {
+    const H = half, X = x => flip ? -x : x, u = H / 20, svg = $('target');
+    const dash = `fill="none" stroke="#8a94a0" stroke-width="${u / 12}" stroke-dasharray="${u / 3} ${u / 3}"`;
+    let g = `<rect x="${-H}" y="${-H}" width="${2 * H}" height="${2 * H}" fill="#e9edf1"/>
+      <path d="M${-H} 0H${H}M0 ${-H}V${H}" stroke="#b7c0c9" stroke-width="${u / 8}"/>
+      <circle r="1" fill="#fff" stroke="#1d2733" stroke-width="${u / 3}"/><circle r=".5" fill="none" stroke="#c4ccd4" stroke-width="${u / 8}"/>
+      <circle r=".9" ${dash}/><circle r="1.1" ${dash}/>`;
+    const lab = (x, y, t) => `<text x="${X(x)}" y="${y}" font-size="${u * 1.5}" fill="#4b5663" text-anchor="middle" dominant-baseline="middle">${t}</text>`;
+    g += lab(0, -H * .9, '上') + lab(0, H * .9, '下') + lab(-H * .9, 0, '左') + lab(H * .9, 0, '右'); // 保存座標の向きで配置（反転時は画面上で左右が入れ替わる）
+    arr.forEach((r, i) => {
+      if (!r || r.status !== 'located') return; // 位置不明の外れは的の上に出さない
+      const x = X(r.x), y = r.y, c = isHit(r.x, r.y) ? '#0b6bcb' : '#c4271d';
+      if (isNearBoundary(r.x, r.y)) g += `<circle cx="${x}" cy="${y}" r="${u * 1.6}" fill="none" stroke="#1d2733" stroke-width="${u / 6}" stroke-dasharray="${u / 3} ${u / 4}"/>`;
+      if (i === sel) g += `<circle cx="${x}" cy="${y}" r="${u * 2.1}" fill="none" stroke="#f0a000" stroke-width="${u / 2.5}"/>`;
+      g += isHit(r.x, r.y)
+        ? `<circle cx="${x}" cy="${y}" r="${u}" fill="${c}" stroke="#fff" stroke-width="${u / 4}"/>`
+        : `<path d="M${x - u} ${y - u}L${x + u} ${y + u}M${x - u} ${y + u}L${x + u} ${y - u}" stroke="#fff" stroke-width="${u * .85}" stroke-linecap="round"/><path d="M${x - u} ${y - u}L${x + u} ${y + u}M${x - u} ${y + u}L${x + u} ${y - u}" stroke="${c}" stroke-width="${u * .45}" stroke-linecap="round"/>`;
+      g += `<text x="${x}" y="${y - u * 2.7}" font-size="${u * 1.7}" font-weight="700" fill="#1d2733" text-anchor="middle" stroke="#fff" stroke-width="${u / 3}" paint-order="stroke">${i + 1}</text>`;
+    });
+    svg.setAttribute('viewBox', `${-H} ${-H} ${2 * H} ${2 * H}`);
+    svg.innerHTML = g;
+  }
+
+
+  function renderChrome() {
+    const rec = tab === 'rec';
+    $('tabRec').className = 'tab' + (rec ? ' on' : ''); $('tabRoster').className = 'tab' + (rec ? '' : ' on');
+    $('recView').hidden = !(rec && store); $('rosterView').hidden = rec;
+    const empty = rec && !store;
+    $('empty').hidden = !empty;
+    if (empty) $('empty').textContent = dbPending ? '保存領域を準備中です…' : saveState === 'unavailable' ? `部員名簿を読み込めません。保存領域を確認してください（原因: ${saveReason || '不明'}）。${blocked ? '他のタブやホーム画面のアプリを閉じてから、' : ''}使えるようになったら、このページを再読み込みしてください。それまで記録はできません` : '有効な部員がいません。「部員管理」で部員を登録してください';
+    const lockedUnsaved = locked && store ? keyDiff(savedJson, JSON.stringify(store.state.records)).size : 0;
+    $('banner').hidden = !(locked || (rec && deferred));
+    $('banner').textContent = locked ? LOCK_MSG + (lockedUnsaved ? `　この画面の未保存の記録（${lockedUnsaved}件）は保存されていません。` : '') : deferred ? '部員の変更はまだ反映されていません。未保存の記録が保存されたあと、記録画面を開き直すと反映されます' : '';
+    if (!store) { $('who').textContent = ''; $('now').textContent = ''; }
+  }
+  function renderBadge() {
+    const lockedN = locked && store ? keyDiff(savedJson, JSON.stringify(store.state.records)).size : 0;
+    const T = locked ? [lockedN ? `未保存 ${lockedN}件（保存できません）` : '保存済みの記録のみ（保存できません）', 'bad'] : { pending: ['保存準備中', ''], ok: unsaved.size ? [`未保存 ${unsaved.size}件（保存に失敗）`, 'bad'] : ['保存可能', 'ok'], unavailable: [store ? '未保存（保存できません）' : '保存領域を使えません', 'bad'] }[saveState];
+    $('save').textContent = T[0]; $('save').className = T[1]; $('save').title = saveReason;
+  }
+  function render() {
+    renderChrome(); renderBadge();
+    $('flip').checked = flip; $('half').value = String(half);
+    if (!store) return;
+    const s = store.state, last = s.members.length - 1, m = s.members[s.mi], arr = s.records[m.id], st = statsOf(arr), all = totalStats(s.records);
+    $('who').textContent = `${m.name}（${s.mi + 1}/${s.members.length}人目）`;
+    $('now').textContent = s.sel == null ? '4射とも入力済み' : `${s.sel + 1}射目を${arr[s.sel] ? '修正' : '入力'}中`;
+    $('now').className = s.sel == null ? 'done' : '';
+    drawTarget(arr, s.sel);
+    const lockedDiff = locked ? keyDiff(savedJson, JSON.stringify(s.records)) : null; // 保存済みの射を「未保存」と誤認させない
+    $('chips').innerHTML = arr.map((r, i) => {
+      const f = info(r), near = r && r.status === 'located' && isNearBoundary(r.x, r.y), key = m.id + ':' + i, uns = locked ? lockedDiff.has(key) : r ? (saveState === 'unavailable' || unsaved.has(key)) : unsaved.has(key);
+      return `<button data-i="${i}" class="chip${i === s.sel ? ' sel' : ''}"><b>${i + 1}射目</b><span class="sym">${f.s}</span><span>${f.t}</span>${near ? '<small>境界付近</small>' : ''}${uns ? `<small class="uns">${r ? '未保存' : '削除が未保存'}</small>` : ''}</button>`;
+    }).join('');
+    $('unloc').disabled = s.sel == null || locked; $('del').disabled = s.sel == null || !arr[s.sel] || locked; $('undo').disabled = !store.canUndo() || locked;
+    $('prev').disabled = s.mi === 0; $('next').disabled = s.mi === last;
+    $('next').textContent = s.mi === last ? '最後の部員です' : '次の部員へ ▶';
+    $('jump').innerHTML = s.members.map((x, k) => `<option value="${k}"${k === s.mi ? ' selected' : ''}>${s.records[x.id].every(Boolean) ? '✓ ' : ''}${esc(x.name)}</option>`).join('');
+    $('stats').textContent = `${m.name}：記録${st.recorded}射中${st.hits}中　／　全体：記録${all.recorded}射中${all.hits}中` + (all.recorded ? `（${(all.hits / all.recorded * 100).toFixed(1)}%）` : '');
+  }
+  const esc = t => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+  let drag = null;
+  const apply = e => { const w = pointToWorld(e.clientX, e.clientY, $('target').getBoundingClientRect(), view()); const r = store.place(drag.i, w.x, w.y); if (!r.ok) say(r.reason, true); return r.ok; };
+  const target = $('target');
+  target.addEventListener('pointerdown', e => {
+    if (locked) return say(LOCK_MSG, true);
+    if (dbPending) return say('保存領域を準備中です。少しお待ちください', true);
+    if (!store && saveState === 'unavailable') return say('部員名簿を読み込めないため、記録できません', true);
+    if (syncing || !store) return say('部員の読み込み中です。少しお待ちください', true);
+    const s = store.state; if (s.sel == null) return say('4射とも入力済みです。修正する射の番号を選んでください', true);
+    e.preventDefault(); if (target.setPointerCapture) target.setPointerCapture(e.pointerId);
+    drag = { i: s.sel, before: store.snap(), store }; apply(e);
+  });
+  target.addEventListener('pointermove', e => { if (drag && drag.store === store && !locked) apply(e); });
+  target.addEventListener('pointerup', () => {
+    if (!drag) return; const { i, before, store: st0 } = drag; drag = null; if (st0 !== store) return; store.settle(before);
+    const f = info(store.state.records[store.state.members[store.state.mi].id][i]);
+    say(`${i + 1}射目：${f.t}`);
+  });
+  target.addEventListener('pointercancel', () => { if (drag) { if (drag.store === store) store.restore(drag.before); drag = null; } });
+  // view=true は表示の切り替えだけ（部員の移動）。記録を変える操作は locked のあいだ使えない
+  const on = (id, fn, view) => { $(id).onclick = () => { if (!store || syncing) return; if (locked && !view) return say(LOCK_MSG, true); fn(); }; };
+  $('chips').onclick = e => { const b = e.target.closest('button'); if (b && store && !syncing) { if (locked) return say(LOCK_MSG, true); store.select(+b.dataset.i); say(''); } };
+  on('unloc', () => { const i = store.state.sel; store.unlocated(i); say(`${i + 1}射目：位置不明の外れ`); });
+  on('del', () => { const i = store.state.sel; store.remove(i); say(`${i + 1}射目を削除しました（取り消しで戻せます）`); });
+  on('undo', () => { store.undo(); say('直前の操作を取り消しました'); });
+  on('prev', () => { store.prev(); say(locked ? LOCK_MSG : ''); }, true);
+  on('next', () => { store.next(); say(locked ? LOCK_MSG : store.state.mi === store.state.members.length - 1 ? '最後の部員です' : ''); }, true);
+  $('jump').onchange = e => { if (store && !syncing) { store.goto(+e.target.value); say(locked ? LOCK_MSG : ''); } };
+  $('flip').onchange = e => { flip = e.target.checked; setLs('flip', flip ? '1' : '0'); render(); };
+  $('half').onchange = e => { half = +e.target.value; setLs('half', half); render(); };
+
+  // ---- 部員管理 ----
+  const need = () => { if (locked) throw new Error(LOCK_MSG); if (!db) throw new Error('保存領域を使えないため、部員の変更はできません'); };
+  const refresh = async () => { roster = await listMembers(db); rosterView.render(); };
+  const readFile = f => f instanceof Uint8Array || f instanceof ArrayBuffer ? Promise.resolve(f) : f.arrayBuffer ? f.arrayBuffer() : new Promise((res, rej) => { const r = new win.FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsArrayBuffer(f); });
+  function download(name, text) {
+    const url = win.URL.createObjectURL(new win.Blob([text], { type: 'text/csv;charset=utf-8' })), a = doc.createElement('a');
+    a.href = url; a.download = name; doc.body.append(a); a.click(); a.remove(); setTimeout(() => win.URL.revokeObjectURL(url), 1000);
+  }
+  const ops = {
+    add: async (f, dup) => { need(); await addMember(db, f, { allowDuplicate: dup }); await refresh(); },
+    update: async (id, f) => { need(); await updateMember(db, id, f); await refresh(); },
+    hide: async (id, reason) => { need(); await setHidden(db, id, reason); await refresh(); },
+    show: async id => { need(); await setShown(db, id); await refresh(); },
+    move: async (id, dir) => { need(); await moveMember(db, id, dir); await refresh(); },
+    importPreview: async file => { need(); const { text, encoding } = decodeCsv(await readFile(file)), plan = buildPlan(parseCsv(text), roster); plan.encoding = encoding; return plan; },
+    importApply: async (plan, choices) => { need(); const r = await applyImport(db, selectOps(plan, choices)); await refresh(); return r; },
+    exportCsv: inc => { const d = new Date(), p = n => String(n).padStart(2, '0'); download(`部員名簿_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}.csv`, toCsv(roster, { includeHidden: inc })); },
+  };
+  const rosterView = createRosterView({ doc, root: $('rosterView'), ops, getState: () => ({ members: roster, canEdit: !!db && !dbPending, syncing, reason: locked ? LOCK_MSG : dbPending ? '保存領域を準備中です' : '保存領域を使えないため、部員管理は表示のみです（' + (saveReason || '原因不明') + '）' }) });
+
+  // 部員構成（有効部員IDの並び）が変わったときだけ、保存済みデータを読み直してStoreを作り直す（Undo履歴は切れる）
+  async function rebuildStore(d, keepId) {
+    const members = sortActive(roster.slice()).map(m => ({ id: m.id, name: m.name }));
+    if (!members.length) { store = null; activeMembers = []; curSig = ''; savedJson = ''; unsaved = new Set(); return; }
+    const saved = await withTimeout(loadShots(d, members.map(m => m.id)), timeoutMs), init = {};
+    for (const m of members) init[m.id] = saved[m.id] || Array(SHOTS).fill(null);
+    activeMembers = members; store = makeStore(activeMembers, init); curSig = configSignature(roster);
+    savedJson = JSON.stringify(store.state.records); unsaved = new Set();
+    const k = keepId ? members.findIndex(m => m.id === keepId) : -1;
+    if (k > 0) store.goto(k);
+  }
+  async function syncStore() {
+    if (!db || syncing) return;
+    await Promise.allSettled([...inflight]);
+    for (const m of roster) { const a = activeMembers.find(x => x.id === m.id); if (a) a.name = m.name; } // 氏名などの編集はStoreを作り直さず反映
+    if (configSignature(roster) === curSig) { deferred = false; return; }
+    if (unsavedNow()) { deferred = true; return; } // 未保存データがあるときは再生成しない
+    syncing = true; render();
+    try { await rebuildStore(db, store ? activeMembers[store.state.mi].id : null); deferred = false; say(''); }
+    catch (e) { deferred = true; say(`部員の読み込みに失敗しました（${e && e.message || e}）`, true); }
+    syncing = false;
+  }
+  async function showTab(t) {
+    tab = t;
+    if (t === 'roster') { rosterView.render(); render(); return; }
+    render(); await syncStore(); render();
+  }
+  $('tabRec').onclick = () => showTab('rec');
+  $('tabRoster').onclick = () => showTab('roster');
+
+  // 画面の描画とボタン登録を先に済ませ、IndexedDBは後から非同期で準備する（応答しなくても画面は動く）
+  render(); rosterView.render();
+  const ready = (async () => {
+    let d = null;
+    try {
+      d = await withTimeout(openDb({ idb, onBlocked: () => { blocked = true; say('他のタブやホーム画面のアプリを閉じてください（データベース更新待ち）', true); }, onVersionChange: () => {
+        db = null; locked = true; drag = null; deferred = false; saveState = 'unavailable'; saveReason = '別のタブで保存領域が更新されました'; // 接続は openDb 側で閉じ済み。表示中の記録は消さない
+        say(LOCK_MSG, true); render(); rosterView.render();
+      } }), timeoutMs, late => late.close());
+      roster = await withTimeout(listMembers(d), timeoutMs);
+      await rebuildStore(d, null);
+      db = d; saveState = 'ok'; say('');
+    } catch (e) {
+      if (d) { try { d.close(); } catch {} }
+      saveState = 'unavailable'; saveReason = blocked ? '他のタブが使用中です' : `${e && e.name || ''} ${e && e.message || ''}`.trim() || '原因不明';
+      say(`部員名簿を読み込めません（${saveReason}）。${blocked ? '他のタブやホーム画面のアプリを閉じて、' : ''}保存領域を確認し、再読み込みしてください`, true);
+      // 名簿または保存済みの記録を正常に読めないときは、記録画面を使えない状態にする（仮名簿・一部だけの名簿では記録させない）
+      store = null; activeMembers = []; curSig = ''; savedJson = ''; unsaved = new Set(); roster = [];
+    }
+    dbPending = false; render(); rosterView.render();
+  })();
+  return { ready, api: { getStore: () => store, getRoster: () => roster, getDb: () => db, showTab, ops, state: () => ({ saveState, saveReason, unsaved: new Set(unsaved), deferred, tab, syncing, dbPending }) } };
+}
+
+startApp();
 
 </script>
 </body></html>
