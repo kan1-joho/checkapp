@@ -30,7 +30,7 @@ label{display:flex;align-items:center;gap:8px;min-height:44px}input[type=checkbo
 table.prev{border-collapse:collapse;width:100%;font-size:14px}table.prev td,table.prev th{border:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top}table.prev tr.error{background:#fde8e6}table.prev tr.dup_name{background:#fff6dc}
 [hidden]{display:none!important}
 </style></head><body>
-<header><div id="who"></div><div id="now"></div><b id="save"></b><small id="build" style="opacity:.7">build 2A-1（1ファイル版）· src:b45b7488</small></header>
+<header><div id="who"></div><div id="now"></div><b id="save"></b><small id="build" style="opacity:.7">build 2A-1（1ファイル版）· src:f79ec0e8</small></header>
 <nav id="tabs"><button id="tabRec" class="tab on">記録</button><button id="tabRoster" class="tab">部員管理</button></nav>
 <div id="banner" hidden></div>
 <pre id="diag" hidden style="margin:0;padding:8px 12px;background:#fde8e6;color:#8a1a12;white-space:pre-wrap;font:14px/1.5 system-ui,sans-serif"></pre>
@@ -45,6 +45,7 @@ table.prev{border-collapse:collapse;width:100%;font-size:14px}table.prev td,tabl
 <div id="stats"></div>
 <label><input type="checkbox" id="flip">左右反転表示（保存座標は変わりません）</label>
 <label>表示範囲 <select id="half"><option value="1.5">±1.5</option><option value="2">±2（標準）</option><option value="3">±3</option></select></label>
+<div class="card" id="shotCsvCard"><button id="shotCsv">射記録CSVを書き出す</button><div class="note">保存済みの射記録（非表示の部員も含む）を、表計算ソフトで開けるCSVにします。画面の内容は変わりません</div></div>
 </aside></main>
 <section id="rosterView" hidden></section>
 <script>
@@ -477,6 +478,61 @@ function toCsv(members, { includeHidden = false } = {}) {
   return '\uFEFF' + lines.join('\r\n') + '\r\n';
 }
 
+// ---- shot-csv.js ----
+// 射記録CSV（純粋関数。DBやDOMには触れない）。部員CSV（csv.js）とは別の処理で、guardFormula は使わない
+// 列: member_id, member_name, member_status, shot_number, shot_status, result, x, y
+const SHOT_CSV_HEADERS = ['member_id', 'member_name', 'member_status', 'shot_number', 'shot_status', 'result', 'x', 'y'];
+class ShotCsvError extends Error { constructor(code, msg) { super(msg); this.name = 'ShotCsvError'; this.code = code; } }
+
+// 文字列列: 先頭が = + - @ タブ CR のとき ' を付け、カンマ・引用符・改行を含むときは "..." で囲む
+const textCell = s => { const t = String(s == null ? '' : s), g = isDangerousLead(t) ? "'" + t : t; return /[",\r\n]/.test(g) ? '"' + g.replace(/"/g, '""') + '"' : g; };
+// 数値列（x, y）: 保存値をそのまま文字にする。数式対策・丸め・符号変更はしない（-0 も符号を残す）
+const numCell = v => Object.is(v, -0) ? '-0' : String(v);
+
+// 端末のローカル日付（toISOString は使わない）
+const shotCsvFileName = (d = new Date()) => { const p = n => String(n).padStart(2, '0'); return `射記録_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}.csv`; };
+
+const UNKNOWN = { name: '', status: 'unknown' }; // 対応する部員がいない射（通常は発生しない）。落とさずに出す
+
+function checkShot(r) {
+  if (!r || typeof r !== 'object') throw new ShotCsvError('bad_record', '射記録の形が不正です');
+  if (typeof r.memberId !== 'string' || !r.memberId) throw new ShotCsvError('bad_record', '射記録に部員IDがありません');
+  if (!Number.isInteger(r.shotIndex) || r.shotIndex < 0 || r.shotIndex > 3) throw new ShotCsvError('bad_record', `射番号が不正です（${r.memberId}）`);
+  if (r.status === 'located') { if (!Number.isFinite(r.x) || !Number.isFinite(r.y)) throw new ShotCsvError('bad_record', `座標が数値ではありません（${r.memberId} の${r.shotIndex + 1}射目）`); }
+  else if (r.status !== 'unlocated_miss') throw new ShotCsvError('bad_record', `状態が不正です（${r.memberId} の${r.shotIndex + 1}射目）`);
+}
+
+// shots: DBの射レコード（保存済みのものだけ）。members: DBの全部員（非表示を含む）
+// 戻り値: { csv, count }。出力する射が0件のときは ShotCsvError('empty') を投げる（空のCSVを成功扱いにしない）
+function buildShotCsv(shots, members) {
+  if (!Array.isArray(shots) || !shots.length) throw new ShotCsvError('empty', '出力できる保存済み射記録がありません');
+  for (const r of shots) checkShot(r);
+  const byId = new Map(members.map(m => [m.id, m]));
+  // 並び順: 有効部員（名簿順）→ 非表示部員 → 対応する部員がいないID。各部員の中は射番号順
+  const order = new Map(); let k = 0;
+  for (const m of sortActive(members.slice()).concat(sortHidden(members.slice()))) order.set(m.id, k++);
+  const orphans = [...new Set(shots.map(r => r.memberId).filter(id => !byId.has(id)))].sort();
+  for (const id of orphans) order.set(id, k++);
+  const rows = shots.slice().sort((a, b) => (order.get(a.memberId) - order.get(b.memberId)) || (a.shotIndex - b.shotIndex));
+  const lines = [SHOT_CSV_HEADERS.join(',')];
+  for (const r of rows) {
+    const m = byId.get(r.memberId) || UNKNOWN, located = r.status === 'located';
+    lines.push([textCell(r.memberId), textCell(m.name), textCell(m.status), String(r.shotIndex + 1), textCell(r.status),
+      textCell(located ? (isHit(r.x, r.y) ? '的中' : '外れ') : '位置不明'), located ? numCell(r.x) : '', located ? numCell(r.y) : ''].join(','));
+  }
+  return { csv: '\uFEFF' + lines.join('\r\n') + '\r\n', count: rows.length };
+}
+
+// ---- shot-export.js ----
+// 射記録CSV用の読み取り専用の取得。shots と members を1つの readonly トランザクションで読む（書き込み・削除はしない）
+// 非表示部員の射も含めて全件返す（membersの状態では絞り込まない）
+async function readShotExportData(db) {
+  const tx = db.transaction(['shots', 'members'], 'readonly');
+  const s = tx.objectStore('shots').getAll(), m = tx.objectStore('members').getAll();
+  await done(tx);
+  return { shots: s.result.filter(r => r.sessionId === SESSION), members: m.result };
+}
+
 // ---- roster-view.js ----
 // 部員管理画面。氏名などの利用者入力はすべて textContent / value で扱い、innerHTML には入れない
 function createRosterView({ doc, root, ops, getState }) {
@@ -672,6 +728,7 @@ function startApp(env = {}) {
     $('banner').hidden = !(locked || (rec && deferred));
     $('banner').textContent = locked ? LOCK_MSG + (lockedUnsaved ? `　この画面の未保存の記録（${lockedUnsaved}件）は保存されていません。` : '') : deferred ? '部員の変更はまだ反映されていません。未保存の記録が保存されたあと、記録画面を開き直すと反映されます' : '';
     if (!store) { $('who').textContent = ''; $('now').textContent = ''; }
+    $('shotCsv').disabled = locked || !db || dbPending; // 射記録CSVは、保存領域を使えるときだけ
   }
   function renderBadge() {
     const lockedN = locked && store ? keyDiff(savedJson, JSON.stringify(store.state.records)).size : 0;
@@ -749,6 +806,30 @@ function startApp(env = {}) {
     importApply: async (plan, choices) => { need(); const r = await applyImport(db, selectOps(plan, choices)); await refresh(); return r; },
     exportCsv: inc => { const d = new Date(), p = n => String(n).padStart(2, '0'); download(`部員名簿_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}.csv`, toCsv(roster, { includeHidden: inc })); },
   };
+  // ---- 射記録CSV（読み取り専用。部員CSVとは別処理。DBへは書き込まない） ----
+  const confirmFn = env.confirm || (m => win.confirm(m));
+  let exporting = false;
+  async function exportShotCsv() {
+    if (exporting) return;
+    const refuse = () => locked ? say(LOCK_MSG, true) : dbPending ? say('保存領域を準備中です。少しお待ちください', true) : !db ? say('保存領域を使えないため、射記録CSVは出力できません', true) : false;
+    if (refuse() !== false) return;
+    exporting = true;
+    try {
+      await Promise.allSettled([...inflight]); // 保存中の射があれば、結果が出てから読む
+      if (refuse() !== false) return;
+      const { shots, members } = await readShotExportData(db);
+      const { csv, count } = buildShotCsv(shots, members); // 0件のときは ShotCsvError('empty')
+      const n = store ? Math.max(unsaved.size, keyDiff(savedJson, JSON.stringify(store.state.records)).size) : 0;
+      if (n > 0 && !confirmFn(`未保存の射が${n}件あります。今回のCSVには、データベースに保存済みの射記録のみが含まれます。続行しますか？`)) return say('CSVの出力を中止しました');
+      if (refuse() !== false) return; // 読み込みや確認のあいだに versionchange が起きていたら出力しない
+      download(shotCsvFileName(new Date()), csv);
+      say(`射記録${count}件をCSVで書き出しました${n > 0 ? `（未保存の${n}件は含まれていません）` : ''}`);
+    } catch (e) {
+      say(e instanceof ShotCsvError && e.code === 'empty' ? e.message : `射記録CSVを出力できませんでした（${e && e.message || e}）`, true);
+    } finally { exporting = false; }
+  }
+  $('shotCsv').onclick = () => { exportShotCsv(); };
+
   const rosterView = createRosterView({ doc, root: $('rosterView'), ops, getState: () => ({ members: roster, canEdit: !!db && !dbPending, syncing, reason: locked ? LOCK_MSG : dbPending ? '保存領域を準備中です' : '保存領域を使えないため、部員管理は表示のみです（' + (saveReason || '原因不明') + '）' }) });
 
   // 部員構成（有効部員IDの並び）が変わったときだけ、保存済みデータを読み直してStoreを作り直す（Undo履歴は切れる）
@@ -802,7 +883,7 @@ function startApp(env = {}) {
     }
     dbPending = false; render(); rosterView.render();
   })();
-  return { ready, api: { getStore: () => store, getRoster: () => roster, getDb: () => db, showTab, ops, state: () => ({ saveState, saveReason, unsaved: new Set(unsaved), deferred, tab, syncing, dbPending }) } };
+  return { ready, api: { getStore: () => store, exportShotCsv, getRoster: () => roster, getDb: () => db, showTab, ops, state: () => ({ saveState, saveReason, unsaved: new Set(unsaved), deferred, tab, syncing, dbPending }) } };
 }
 
 startApp();
