@@ -30,7 +30,7 @@ label{display:flex;align-items:center;gap:8px;min-height:44px}input[type=checkbo
 table.prev{border-collapse:collapse;width:100%;font-size:14px}table.prev td,table.prev th{border:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top}table.prev tr.error{background:#fde8e6}table.prev tr.dup_name{background:#fff6dc}
 [hidden]{display:none!important}
 </style></head><body>
-<header><div id="who"></div><div id="now"></div><b id="save"></b><small id="build" style="opacity:.7">build 2A-1（1ファイル版）· src:f79ec0e8</small></header>
+<header><div id="who"></div><div id="now"></div><b id="save"></b><small id="build" style="opacity:.7">build 2A-1（1ファイル版）· src:a40fb4e4</small></header>
 <nav id="tabs"><button id="tabRec" class="tab on">記録</button><button id="tabRoster" class="tab">部員管理</button></nav>
 <div id="banner" hidden></div>
 <pre id="diag" hidden style="margin:0;padding:8px 12px;background:#fde8e6;color:#8a1a12;white-space:pre-wrap;font:14px/1.5 system-ui,sans-serif"></pre>
@@ -204,7 +204,8 @@ function saveMemberShots(db, byMember) {
 
 // ---- roster.js ----
 // 部員データの形・検証・順序（純粋関数。DBやDOMには触れない）
-// 部員: { id, name, kana, grade, status, hiddenReason, hiddenAt, sortOrder, createdAt, updatedAt }
+// 部員: { id, number, name, kana, grade, status, hiddenReason, hiddenAt, sortOrder, createdAt, updatedAt }
+// number（部員番号）: 登録順に1から振る固定の番号。変更・再利用しない（非表示にしても残る）。古いデータには無いことがある
 const STATUS_ACTIVE = 'active', STATUS_HIDDEN = 'hidden';
 const HIDDEN_REASONS = ['退部', '卒業', '誤登録', 'その他'];
 const NAME_MAX = 40, KANA_MAX = 80;
@@ -242,6 +243,10 @@ function validateFields({ name, kana, grade }) {
   return { ok: !errors.length, errors, value: { name: n, kana: k, grade: Number.isNaN(g) ? null : g } };
 }
 
+// 部員番号: 1以上の整数
+const hasNumber = m => !!m && Number.isInteger(m.number) && m.number >= 1;
+const nextNumber = ms => ms.reduce((mx, m) => hasNumber(m) ? Math.max(mx, m.number) : mx, 0) + 1; // 全部員（非表示を含む）の最大値+1
+
 function validateMember(m) {
   if (!m) return { ok: false, errors: ['部員データがありません'] };
   const errors = [];
@@ -251,13 +256,14 @@ function validateMember(m) {
   if (m.status === STATUS_HIDDEN && (!m.hiddenReason || !Number.isFinite(m.hiddenAt))) errors.push('非表示には理由と日時が必要です');
   if (m.status === STATUS_ACTIVE && (m.hiddenReason != null || m.hiddenAt != null)) errors.push('表示中の部員に非表示情報があります');
   if (!Number.isFinite(m.sortOrder)) errors.push('sortOrderが不正です');
+  if (m.number !== undefined && !hasNumber(m)) errors.push('部員番号が不正です');
   return { ok: !errors.length, errors };
 }
 
-const newMember = (fields, { id, now, sortOrder }) => {
+const newMember = (fields, { id, now, sortOrder, number }) => {
   const f = validateFields(fields);
   if (!f.ok) throw new Error(f.errors.join(' / '));
-  return { id, ...f.value, status: STATUS_ACTIVE, hiddenReason: null, hiddenAt: null, sortOrder, createdAt: now, updatedAt: now };
+  return { id, ...(number === undefined ? {} : { number }), ...f.value, status: STATUS_ACTIVE, hiddenReason: null, hiddenAt: null, sortOrder, createdAt: now, updatedAt: now };
 };
 const hideMember = (m, reason, now) => {
   if (!reason) throw new Error('非表示の理由が必要です');
@@ -294,7 +300,7 @@ async function addMember(db, fields, opts = {}) {
   if (!opts.allowDuplicate && cur.some(m => nameKey(m.name) === nameKey(v.value.name))) throw fail(tx, '同じ氏名の部員がすでにいます');
   const id = opts.id || makeId();
   if (cur.some(m => m.id === id)) throw fail(tx, '部員IDが重複しました');
-  const m = newMember(fields, { id, now, sortOrder: nextSortOrder(cur) });
+  const m = newMember(fields, { id, now, sortOrder: nextSortOrder(cur), number: nextNumber(cur) });
   st.put(m); await p; return m;
 }
 
@@ -354,15 +360,27 @@ async function applyImport(db, ops, opts = {}) {
     const v = validateFields(u); if (!v.ok) throw fail(tx, v.errors.join(' / '));
     out.push({ ...old, ...v.value, updatedAt: now });
   }
-  let order = nextSortOrder(cur);
+  let order = nextSortOrder(cur), num = nextNumber(cur);
   for (const a of ops.adds || []) {
     let id; do { id = makeId(); } while (byId.has(id) || seen.has(id));
     seen.add(id);
     const v = validateFields(a); if (!v.ok) throw fail(tx, v.errors.join(' / '));
-    out.push(newMember(a, { id, now, sortOrder: order++ }));
+    out.push(newMember(a, { id, now, sortOrder: order++, number: num++ }));
   }
   for (const m of out) { const r = validateMember(m); if (!r.ok) throw fail(tx, r.errors.join(' / ')); st.put(m); }
   await p; return { added: (ops.adds || []).length, updated: (ops.updates || []).length };
+}
+
+// 部員番号が無い部員（番号機能の追加前に登録した部員）に、登録順（createdAt）で番号を振る。1回で済む処理で、番号のある部員には触れない
+// 追加するのは number だけ（氏名・状態・並び順・updatedAt などは変えない）。単一トランザクションで、全員分を反映するか、何も変えないか
+async function assignMissingNumbers(db) {
+  const tx = db.transaction('members', 'readwrite'), st = tx.objectStore('members'), p = done(tx); p.catch(() => {});
+  const cur = await all(st), missing = cur.filter(m => !hasNumber(m));
+  if (!missing.length) { tx.abort(); return 0; }
+  let n = nextNumber(cur);
+  missing.sort((a, b) => (a.createdAt - b.createdAt) || (a.sortOrder - b.sortOrder) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  for (const m of missing) st.put({ ...m, number: n++ });
+  await p; return missing.length;
 }
 
 // ---- csv.js ----
@@ -480,12 +498,15 @@ function toCsv(members, { includeHidden = false } = {}) {
 
 // ---- shot-csv.js ----
 // 射記録CSV（純粋関数。DBやDOMには触れない）。部員CSV（csv.js）とは別の処理で、guardFormula は使わない
-// 列: member_id, member_name, member_status, shot_number, shot_status, result, x, y
-const SHOT_CSV_HEADERS = ['member_id', 'member_name', 'member_status', 'shot_number', 'shot_status', 'result', 'x', 'y'];
+// 列: ID（部員番号）, member_name, STATUS, 射, 結果（◯＝的中／×＝外れ・位置不明）, 的中率（N射M中。Nは記録済みの射数）, x, y（右端。位置不明は空欄）
+// ID は部員番号（登録順に振った固定の番号）。番号がない部員・部員情報がない射は、部員IDで出す（落とさない）
+const SHOT_CSV_HEADERS = ['ID', 'member_name', 'STATUS', '射', '結果', '的中率', 'x', 'y'];
+const MARK_HIT = '◯', MARK_MISS = '×';
 class ShotCsvError extends Error { constructor(code, msg) { super(msg); this.name = 'ShotCsvError'; this.code = code; } }
 
-// 文字列列: 先頭が = + - @ タブ CR のとき ' を付け、カンマ・引用符・改行を含むときは "..." で囲む
+// 文字列列（ID・氏名・STATUS）: 先頭が = + - @ タブ CR のとき ' を付け、カンマ・引用符・改行を含むときは "..." で囲む
 const textCell = s => { const t = String(s == null ? '' : s), g = isDangerousLead(t) ? "'" + t : t; return /[",\r\n]/.test(g) ? '"' + g.replace(/"/g, '""') + '"' : g; };
+
 // 数値列（x, y）: 保存値をそのまま文字にする。数式対策・丸め・符号変更はしない（-0 も符号を残す）
 const numCell = v => Object.is(v, -0) ? '-0' : String(v);
 
@@ -515,10 +536,13 @@ function buildShotCsv(shots, members) {
   for (const id of orphans) order.set(id, k++);
   const rows = shots.slice().sort((a, b) => (order.get(a.memberId) - order.get(b.memberId)) || (a.shotIndex - b.shotIndex));
   const lines = [SHOT_CSV_HEADERS.join(',')];
+  // 的中率: 部員ごとに「記録済みの射数」と「的中の射数」を数える（未入力の射は分母に入れない。位置不明の外れは外れ）
+  const tally = new Map();
+  for (const r of rows) { const t = tally.get(r.memberId) || { n: 0, hit: 0 }; t.n++; if (r.status === 'located' && isHit(r.x, r.y)) t.hit++; tally.set(r.memberId, t); }
   for (const r of rows) {
-    const m = byId.get(r.memberId) || UNKNOWN, located = r.status === 'located';
-    lines.push([textCell(r.memberId), textCell(m.name), textCell(m.status), String(r.shotIndex + 1), textCell(r.status),
-      textCell(located ? (isHit(r.x, r.y) ? '的中' : '外れ') : '位置不明'), located ? numCell(r.x) : '', located ? numCell(r.y) : ''].join(','));
+    const m = byId.get(r.memberId) || UNKNOWN, t = tally.get(r.memberId), hit = r.status === 'located' && isHit(r.x, r.y);
+    const located = r.status === 'located';
+    lines.push([hasNumber(m) ? String(m.number) : textCell(r.memberId), textCell(m.name), textCell(m.status), String(r.shotIndex + 1), hit ? MARK_HIT : MARK_MISS, `${t.n}射${t.hit}中`, located ? numCell(r.x) : '', located ? numCell(r.y) : ''].join(','));
   }
   return { csv: '\uFEFF' + lines.join('\r\n') + '\r\n', count: rows.length };
 }
@@ -548,6 +572,7 @@ function createRosterView({ doc, root, ops, getState }) {
   const say = (text, kind) => { st.msg = text ? { text, kind } : null; };
   const fmt = ms => { const d = new Date(ms); return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`; };
   const gradeText = g => g ? `${g}年` : '学年未設定';
+  const numText = m => Number.isInteger(m.number) && m.number >= 1 ? `No.${m.number}　` : '';
   async function run(fn, okText) {
     if (st.busy) return; st.busy = true; render();
     try { const r = await fn(); say(okText ? (typeof okText === 'function' ? okText(r) : okText) : '', 'ok'); }
@@ -581,7 +606,7 @@ function createRosterView({ doc, root, ops, getState }) {
         row.append(h('div', {}, h('div', { class: 'nm', text: m.name }), h('small', { text: '非表示にする理由' }), sel),
           h('div', { class: 'btns' }, h('button', { class: 'hOk', disabled: st.busy, onclick: () => run(async () => { await ops.hide(m.id, sel.value); st.hiding = null; }, '非表示にしました（記録は残ります）') }, '非表示にする'), h('button', { onclick: () => { st.hiding = null; render(); } }, 'キャンセル')));
       } else {
-        row.append(h('div', {}, h('div', { class: 'nm', text: `${i + 1}. ${m.name}` }), h('small', { text: `${m.kana || 'ふりがな未設定'}　${gradeText(m.grade)}` })),
+        row.append(h('div', {}, h('div', { class: 'nm', text: `${numText(m)}${m.name}` }), h('small', { text: `${m.kana || 'ふりがな未設定'}　${gradeText(m.grade)}` })),
           h('div', { class: 'btns' },
             h('button', { class: 'up', 'aria-label': '上へ', disabled: !canEdit || st.busy || i === 0, onclick: () => run(() => ops.move(m.id, -1)) }, '↑'),
             h('button', { class: 'down', 'aria-label': '下へ', disabled: !canEdit || st.busy || i === list.length - 1, onclick: () => run(() => ops.move(m.id, 1)) }, '↓'),
@@ -597,7 +622,7 @@ function createRosterView({ doc, root, ops, getState }) {
     if (!list.length) return null;
     const card = h('div', { class: 'card', id: 'hiddenCard' }, h('h2', { text: `非表示の部員（${list.length}人）` }), h('div', { class: 'note', text: '非表示でも過去の記録は残っています。再表示すると名簿の末尾に戻り、記録も復元されます。' }));
     for (const m of list) card.append(h('div', { class: 'mrow', 'data-id': m.id },
-      h('div', {}, h('div', { class: 'nm', text: m.name }), h('small', { text: `${m.hiddenReason || ''}（${m.hiddenAt ? fmt(m.hiddenAt) : ''}）` })),
+      h('div', {}, h('div', { class: 'nm', text: `${numText(m)}${m.name}` }), h('small', { text: `${m.hiddenReason || ''}（${m.hiddenAt ? fmt(m.hiddenAt) : ''}）` })),
       h('div', { class: 'btns' }, h('button', { class: 'show', disabled: !canEdit || st.busy, onclick: () => run(() => ops.show(m.id), '再表示しました（名簿の末尾）') }, '再表示'))));
     return card;
   }
@@ -872,6 +897,9 @@ function startApp(env = {}) {
         say(LOCK_MSG, true); render(); rosterView.render();
       } }), timeoutMs, late => late.close());
       roster = await withTimeout(listMembers(d), timeoutMs);
+      if (roster.some(m => !hasNumber(m))) { // 番号機能の追加前に登録した部員へ、登録順に部員番号を振る（失敗しても名簿・記録は使える）
+        try { await withTimeout(assignMissingNumbers(d), timeoutMs); roster = await withTimeout(listMembers(d), timeoutMs); } catch {}
+      }
       await rebuildStore(d, null);
       db = d; saveState = 'ok'; say('');
     } catch (e) {
