@@ -20,7 +20,7 @@ label{display:flex;align-items:center;gap:8px;min-height:44px}input[type=checkbo
 @media (orientation:landscape){main{grid-template-columns:auto 1fr}#target{width:min(56vw,calc(100vh - 110px))}#stage{align-self:start}}
 #save{margin-left:auto;padding:4px 12px;border-radius:999px;font-size:15px;background:#4b5663;color:#fff}#save.ok{background:#1f6f3e}#save.bad{background:var(--warn)}.uns{color:var(--warn);font-weight:700}
 #tabs{display:flex;gap:8px;padding:6px 12px;background:#e3e8ee}.tab{min-height:44px;padding:4px 18px;font-weight:700}.tab.on{background:var(--acc);border-color:var(--acc);color:#fff}
-#banner{padding:8px 12px;background:#fff1cc;color:#6b4a00;font-weight:600}#empty{padding:24px 12px;text-align:center;font-weight:600}
+#banner{white-space:pre-line;padding:8px 12px;background:#fff1cc;color:#6b4a00;font-weight:600}#empty{padding:24px 12px;text-align:center;font-weight:600}
 #rosterView{display:grid;gap:12px;padding:8px 12px;max-width:900px;margin:0 auto}#rosterView[hidden]{display:none}
 .card{background:#fff;border:2px solid var(--line);border-radius:8px;padding:10px;display:grid;gap:8px}.card h2{margin:0;font-size:18px}
 .mrow{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border-top:1px solid var(--line);padding-top:8px}.mrow:first-of-type{border-top:0;padding-top:0}
@@ -30,7 +30,7 @@ label{display:flex;align-items:center;gap:8px;min-height:44px}input[type=checkbo
 table.prev{border-collapse:collapse;width:100%;font-size:14px}table.prev td,table.prev th{border:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top}table.prev tr.error{background:#fde8e6}table.prev tr.dup_name{background:#fff6dc}
 [hidden]{display:none!important}
 </style></head><body>
-<header><div id="who"></div><div id="now"></div><b id="save"></b><small id="build" style="opacity:.7">build 2A-1（1ファイル版）· src:a40fb4e4</small></header>
+<header><div id="who"></div><div id="now"></div><b id="save"></b><small id="build" style="opacity:.7">build 2B-1（1ファイル版）· src:702a1a4f</small></header>
 <nav id="tabs"><button id="tabRec" class="tab on">記録</button><button id="tabRoster" class="tab">部員管理</button></nav>
 <div id="banner" hidden></div>
 <pre id="diag" hidden style="margin:0;padding:8px 12px;background:#fde8e6;color:#8a1a12;white-space:pre-wrap;font:14px/1.5 system-ui,sans-serif"></pre>
@@ -496,11 +496,381 @@ function toCsv(members, { includeHidden = false } = {}) {
   return '\uFEFF' + lines.join('\r\n') + '\r\n';
 }
 
+// ---- practice.js ----
+// 練習データの形・検証・再開位置（STEP 2-B1。純粋関数のみ。DBやDOMには触れない）
+// 練習メタデータは meta ストアに { key: 'practice:<id>', value } として保存する（ストア・インデックスは追加しない）
+// value: { id, mode, memberId, date, startedAt, endedAt, cursor: { round }, rev, updatedAt }
+//   mode: 'member_order'（memberId は null）／ 'personal_series'（memberId は対象部員）
+//   cursor.round: 現在の立（明示操作「次の立へ」でだけ進む）。rev: 練習の状態を変える操作（立送り・終了・切り替え・再開）で +1
+// 旧データ（sessionId 'test-session'）は練習メタデータを持たない仮想的な練習として扱い、一括変換しない
+const LEGACY_PRACTICE_ID = 'test-session';
+const ACTIVE_KEY = 'activePractice', PRACTICE_PREFIX = 'practice:';
+const MODE_MEMBER_ORDER = 'member_order', MODE_PERSONAL_SERIES = 'personal_series';
+const PRACTICE_MODES = [MODE_MEMBER_ORDER, MODE_PERSONAL_SERIES];
+
+const isLegacyId = id => id === LEGACY_PRACTICE_ID;
+const practiceKey = id => PRACTICE_PREFIX + id;
+const isPracticeKey = k => typeof k === 'string' && k.startsWith(PRACTICE_PREFIX);
+const validPracticeId = id => typeof id === 'string' && /^p_[0-9A-Za-z_-]+$/.test(id); // ':' を含まない（射のキーの区切りと衝突させない）
+// 立番号: 1以上の「安全な整数」（2^53 以上は、隣の整数と区別できず、キーと値の一致を保証できないため不正とする）
+const isRound = n => Number.isSafeInteger(n) && n >= 1;
+// rev（練習の状態を変える操作で +1 する単調増加カウンタ）: 0以上の「安全な整数」。不正なrevは stale（別の画面での変更）ではなく、練習情報の不整合として扱う
+const isRev = n => Number.isSafeInteger(n) && n >= 0;
+// rev を +1 して書いても、安全な整数のままか（上限に達していたら、書き込まずに拒否する）
+const canBumpRev = n => isRev(n) && Number.isSafeInteger(n + 1);
+
+function makePracticeId(cryptoObj = globalThis.crypto) {
+  let u;
+  if (cryptoObj && cryptoObj.randomUUID) u = cryptoObj.randomUUID();
+  else { const b = new Uint8Array(16); cryptoObj.getRandomValues(b); u = [...b].map(x => x.toString(16).padStart(2, '0')).join(''); }
+  return 'p_' + u.replace(/-/g, '');
+}
+// 端末のローカル日付 YYYY-MM-DD（toISOString は使わない）
+const localDate = (d = new Date()) => { const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+
+// 射のキー。旧データは STEP 1/2-A と同じ `${sessionId}:${memberId}:${shotIndex}`（立を持たない）。
+// 新しい練習は `${practiceId}:${memberId}:${round}:${shotIndex}`（shotIndex は旧データと同じ 0〜3）
+const shotKey = (practiceId, memberId, round, shotIndex) => isLegacyId(practiceId) ? `${practiceId}:${memberId}:${shotIndex}` : `${practiceId}:${memberId}:${round}:${shotIndex}`;
+// 「その練習の射」「その練習・部員・立のカード」を、キーの前方一致で範囲指定するための境界（':' の次の文字 ';' までが前方一致）
+const prefixBounds = prefix => [prefix + ':', prefix + ';'];
+const practiceBounds = practiceId => prefixBounds(practiceId);
+const cardBounds = (practiceId, memberId, round) => prefixBounds(`${practiceId}:${memberId}:${round}`);
+
+function newPractice({ id, mode, memberId, now }) {
+  if (!validPracticeId(id)) throw new TypeError(`練習IDが不正です: ${id}`);
+  if (!PRACTICE_MODES.includes(mode)) throw new TypeError(`記録モードが不正です: ${mode}`);
+  if (mode === MODE_PERSONAL_SERIES) { if (typeof memberId !== 'string' || !memberId || memberId.includes(':')) throw new TypeError('個人連続記録には対象部員のIDが必要です'); }
+  else if (memberId != null) throw new TypeError('部員順記録では部員IDを指定しません');
+  if (!Number.isFinite(now)) throw new TypeError('時刻が不正です');
+  return { id, mode, memberId: mode === MODE_PERSONAL_SERIES ? memberId : null, date: localDate(new Date(now)), startedAt: now, endedAt: null, cursor: { round: 1 }, rev: 0, updatedAt: now };
+}
+
+// 保存された練習レコードの値が、練習として読める形か（id・記録モード・rev）
+const practiceShapeOk = (p, id) => !!p && typeof p === 'object' && p.id === id && PRACTICE_MODES.includes(p.mode) && isRev(p.rev);
+const cursorOf = p => p && p.cursor && typeof p.cursor === 'object' ? p.cursor.round : undefined;
+
+// 対象練習の射のうち、有効な立（1以上の整数）の最大値。射が無ければ 0
+function maxRoundOf(shots, practiceId) {
+  let max = 0;
+  for (const r of shots) if (r && r.sessionId === practiceId && isRound(r.round) && r.round > max) max = r.round;
+  return max;
+}
+// ---- R7 の検査（O2）: 新しい練習に属する射記録を厳格に検査する。不正な射を「最大の立の計算から除外」せず、不整合として安全停止する ----
+// 新しい練習だけが対象。旧データ（test-session）は従来形式のまま、この検査を受けない。練習ごとに独立して検査する
+// 「その練習に属する射」= sessionId が練習IDと一致する射、または射のID（主キー）が `${練習ID}:` で始まる射
+//   （どちらか一方だけで探すと、IDとsessionIdの食い違いを見逃す。`p_a` と `p_ab` は、':' を含めた前方一致で区別する）
+const belongsTo = (r, practiceId) => !!r && typeof r === 'object' && (r.sessionId === practiceId || (typeof r.id === 'string' && r.id.startsWith(practiceId + ':')));
+// 不整合の種類は shot_invalid に集約し、detail の reason で区別する（コードを増やしすぎない）
+//   round_invalid: roundが1以上の整数でない ／ shot_index_invalid: shotIndexが0〜3の整数でない ／ session_mismatch: sessionIdが練習IDと異なる
+//   shot_duplicate: 同一練習・同一部員・同一立・同一射番号の重複 ／ shot_key_mismatch: ID（主キー）が各フィールドから作られる正規のキーと一致しない（立・部員・射番号の食い違い、部員IDが不正な場合を含む）
+function inspectShots(practiceId, rows) {
+  const seen = new Set();
+  for (const r of rows) {
+    if (!belongsTo(r, practiceId)) continue;
+    const bad = reason => ({ code: 'shot_invalid', reason, shotId: r.id });
+    if (!isRound(r.round)) return bad('round_invalid');
+    if (!Number.isInteger(r.shotIndex) || r.shotIndex < 0 || r.shotIndex >= SHOTS) return bad('shot_index_invalid');
+    if (r.sessionId !== practiceId) return bad('session_mismatch');
+    if (typeof r.memberId !== 'string' || !r.memberId || r.memberId.includes(':')) return bad('shot_key_mismatch'); // 正規のキーを作れない部員ID
+    const logical = `${r.memberId}\u0000${r.round}\u0000${r.shotIndex}`;
+    if (seen.has(logical)) return bad('shot_duplicate'); seen.add(logical);
+    if (r.id !== shotKey(practiceId, r.memberId, r.round, r.shotIndex)) return bad('shot_key_mismatch');
+  }
+  return null;
+}
+// 練習1つの整合性検査（rows は、その練習に属する射を含む配列）。順序: cursorの形(B) → 射記録の形(O2) → cursorと最大の立(A)
+function inspectPractice(practice, rows) {
+  const behind = checkProgress(practice, maxRoundOf(rows, practice.id));
+  if (behind && behind.code === 'cursor_invalid') return behind;
+  return inspectShots(practice.id, rows) || behind;
+}
+
+// 不整合の検出（新しい練習だけが対象。旧データはcursorを持たないため対象外）
+//   A: cursor.round < 対象練習の射の最大立  B: cursor.round が1以上の整数ではない
+// 次は不整合としない: cursorが最大立と同じ／最大立より大きい／立番号の欠番
+function checkProgress(practice, maxRound) {
+  const c = cursorOf(practice);
+  if (!isRound(c)) return { code: 'cursor_invalid', cursor: c, maxRound };
+  if (c < maxRound) return { code: 'cursor_behind', cursor: c, maxRound };
+  return null;
+}
+const heldOf = p => ({ practiceId: p.id, cursorRound: p.cursor.round, rev: p.rev });
+
+// 再開位置（cursor.round を基準にする。未入力の射を補完せず、位置不明の外れは記録済みとして扱う）
+//   record: その立の最初の空き射から再開 ／ round_complete: 4射とも記録済み。完了状態で待機（自動で次の立へ進まない）
+function resumePosition(practice, shots) {
+  const round = cursorOf(practice);
+  if (practice.mode !== MODE_PERSONAL_SERIES) return { kind: 'member_order', round };
+  const filled = new Set();
+  for (const r of shots) if (r && r.sessionId === practice.id && r.memberId === practice.memberId && r.round === round && Number.isInteger(r.shotIndex) && r.shotIndex >= 0 && r.shotIndex < SHOTS) filled.add(r.shotIndex);
+  for (let i = 0; i < SHOTS; i++) if (!filled.has(i)) return { kind: 'record', round, shotIndex: i, recorded: filled.size };
+  return { kind: 'round_complete', round, shotIndex: null, recorded: filled.size };
+}
+
+// 保存・立送りなどを拒否したときのエラー。lock: 画面を停止すべき種類（'stale'＝別の画面で状態が変わった／'inconsistent'＝進行情報と記録が不一致）
+class PracticeError extends Error {
+  constructor(code, lock, message, detail) { super(message); this.name = 'PracticeError'; this.code = code; this.lock = lock; this.detail = detail || {}; }
+}
+
+// ---- practice-db.js ----
+// 練習データのDB層（STEP 2-B1）。DB接続は保持しない（app.js が管理し、引数で受け取る）。ストア・インデックスは追加しない。
+// すべての検証と書き込みを1つの readwrite トランザクションにまとめ、トランザクション中に await を挟まない（リクエストのコールバックでつなぐ）。
+// 拒否・失敗時はトランザクションを abort し、shots・meta には何も書かない。
+
+// body(t) の中で t.get / t.all でリクエストをつなぎ、t.finish(値) で結果を渡す。t.fail(エラー) で abort して reject する
+function pdbRun(db, stores, mode, body) {
+  return new Promise((resolve, reject) => {
+    let tx, failure = null, result;
+    try { tx = db.transaction(stores, mode); } catch (e) { reject(e); return; }
+    const fail = e => { if (!failure) failure = e; try { tx.abort(); } catch {} };
+    const guard = f => v => { try { f(v); } catch (e) { fail(e); } };
+    const t = {
+      tx, fail, finish: v => { result = v; },
+      get: (store, key, f) => { const r = tx.objectStore(store).get(key); r.onsuccess = guard(() => f(r.result)); },
+      every: (store, f) => { const r = tx.objectStore(store).getAll(); r.onsuccess = guard(() => f(r.result)); },
+      all: (store, bounds, f) => { const r = tx.objectStore(store).getAll(IDBKeyRange.bound(bounds[0], bounds[1], false, true)); r.onsuccess = guard(() => f(r.result)); },
+    };
+    tx.oncomplete = () => failure ? reject(failure) : resolve(result);
+    tx.onabort = () => reject(failure || tx.error || new Error('トランザクションが中止されました'));
+    try { body(t); } catch (e) { fail(e); }
+  });
+}
+const stale = (code, msg, detail) => new PracticeError(code, 'stale', msg, detail);
+const inconsistent = (code, msg, detail) => new PracticeError(code, 'inconsistent', msg, detail);
+// 上限到達（立・rev）: データは不正ではなく、読み込みも保存も終了もできる。次の立へ進む／revを更新する操作だけを拒否し、アプリ全体はロックしない（lock なし）
+const exhausted = (code, msg, detail) => new PracticeError(code, null, msg, detail);
+const progressError = bad => inconsistent(bad.code,
+  bad.code === 'cursor_behind' ? `練習の進行情報（現在の立: ${bad.cursor}）と記録（最大の立: ${bad.maxRound}）が一致しません`
+    : bad.code === 'shot_invalid' ? `練習の射の記録が正しくありません（${bad.reason}: ${bad.shotId}）` : '練習の進行情報（現在の立）が正しい値ではありません',
+  bad.code === 'shot_invalid' ? { reason: bad.reason, shotId: bad.shotId } : { cursor: bad.cursor, maxRound: bad.maxRound });
+const isHeld = h => !!h && typeof h.practiceId === 'string' && !!h.practiceId && isRound(h.cursorRound) && isRev(h.rev);
+// activePractice のID: 旧データ（test-session）か、新しい練習IDの形式（validPracticeId）だけが正しい。それ以外は練習レコードを探さず、旧データにも落とさず、安全停止する
+const activeIdOk = id => isLegacyId(id) || validPracticeId(id);
+const activeInvalid = () => inconsistent('active_invalid', '現在の練習の情報を正しく読み取れません');
+// rev を +1 できない（安全な整数の上限）: 書き込まずに、その操作だけを拒否する（ロックしない）。revが不正な場合は practiceShapeOk が先に practice_invalid で拒否する
+const revExhausted = rev => exhausted('rev_exhausted', '練習の更新回数が上限に達しているため、これ以上更新できません', { rev });
+
+// 練習の整合性検査の入口（検証と射の読み取りをここに集約）。cursor と射記録の矛盾を返す（問題なければ null）
+const pdbInspect = inspectPractice;
+// 対象練習の射の取得。full=true: 全射記録を走査し、その練習に属する射（sessionIdが一致、またはIDが前方一致）を返す（インデックスを追加せずに、
+//   「sessionIdは対象練習だがIDが別形式」の射を見つけるため）。すべての入口（読み込み・開始・切り替え・立送り・終了・射保存）がこれを使う
+//   full=false: IDの前方一致の範囲だけ。現在は使われていない（範囲外の不整合を見逃すため、安全性を要する検査には使わない）
+const pdbShotRows = (t, pid, full, cb) => full ? t.every('shots', rows => cb(rows.filter(r => belongsTo(r, pid)))) : t.all('shots', practiceBounds(pid), cb);
+
+// expected: 呼び出し元（画面）が認識している、現在のactive状態。DB上の状態と同一トランザクション内で照合する
+//   null＝activePracticeなし ／ { practiceId: 'test-session' }＝旧データ ／ { practiceId, cursorRound, rev }＝新しい練習
+// 省略（undefined）は許さない（「確認しない」を既定にしない）
+function pdbExpected(e) {
+  if (e === null) return e;
+  if (e && typeof e === 'object' && isLegacyId(e.practiceId)) return e;
+  if (isHeld(e)) return e;
+  throw new TypeError("expected（画面が認識している現在のactive状態）が必要です: null／{ practiceId: 'test-session' }／{ practiceId, cursorRound, rev }");
+}
+// 同一トランザクション内で activePractice を読み、expected と照合する。cont() は、照合と（新しい練習がactiveなら）整合性検査に通ったときだけ呼ばれる
+//   不一致 → stale ／ activeな新しい練習の不整合 → inconsistent ／ どちらも何も書かずにabort
+function pdbCheckActive(t, expected, cont) {
+  t.get('meta', ACTIVE_KEY, act => {
+    const aid = act && act.value && act.value.id;
+    if (act && !activeIdOk(aid)) return t.fail(activeInvalid());
+    if (expected === null) { if (act) return t.fail(stale('practice_changed', '別の練習が開始されています', { active: aid })); return cont(); }
+    if (isLegacyId(expected.practiceId)) { if (aid !== LEGACY_PRACTICE_ID) return t.fail(stale('practice_changed', '別の練習に切り替わっています', { active: aid })); return cont(); }
+    if (aid !== expected.practiceId) return t.fail(stale('practice_changed', '別の練習に切り替わっています', { active: aid }));
+    t.get('meta', practiceKey(aid), rec => {
+      const p = rec && rec.value, bad = pdbVerifyHeld(p, expected);
+      if (bad) return t.fail(bad);
+      pdbShotRows(t, aid, true, rows => { const nc = pdbInspect(p, rows); if (nc) return t.fail(progressError(nc)); cont(); });
+    });
+  });
+}
+
+// 画面が保持する状態 held = { practiceId, cursorRound, rev } とDBの状態を照合する（shots を読む前に分かる分）
+// 戻り値: 拒否するときは PracticeError、問題なければ null。順序: 練習の形 → cursorの形(B) → cursor一致 → rev一致
+function pdbVerifyHeld(p, held) {
+  if (!practiceShapeOk(p, held.practiceId)) return inconsistent('practice_invalid', '練習情報を正しく読み取れません');
+  const c = cursorOf(p);
+  if (!isRound(c)) return progressError({ code: 'cursor_invalid', cursor: c, maxRound: 0 });
+  if (c !== held.cursorRound) return stale('cursor_changed', '現在の立が別の画面で変更されています', { cursor: c, held: held.cursorRound });
+  if (p.rev !== held.rev) return stale('rev_changed', '練習の状態が別の画面で変更されています', { rev: p.rev, held: held.rev });
+  return null;
+}
+
+// 起動時などの読み込み（読み取り専用）。練習レコードと対象練習の射を同一トランザクションで読み、不整合を検出する
+// kind: none（activePractice なし）／ legacy（旧データ）／ ok（新しい練習。resume 付き）／ inconsistent（安全停止すべき状態）
+function loadPracticeState(db) {
+  return pdbRun(db, ['meta', 'shots'], 'readonly', t => {
+    t.get('meta', ACTIVE_KEY, act => {
+      if (!act) return t.finish({ kind: 'none' });
+      const id = act.value && act.value.id;
+      if (id === LEGACY_PRACTICE_ID) return t.finish({ kind: 'legacy' });
+      if (!validPracticeId(id)) return t.finish({ kind: 'inconsistent', code: 'active_invalid' }); // 新しい練習IDの形式でなければ、練習レコードを探さずに停止
+      t.get('meta', practiceKey(id), rec => {
+        const p = rec && rec.value;
+        if (!practiceShapeOk(p, id)) return t.finish({ kind: 'inconsistent', code: 'practice_invalid', practiceId: id });
+        pdbShotRows(t, id, true, rows => {
+          const bad = pdbInspect(p, rows);
+          if (bad) return t.finish({ kind: 'inconsistent', practiceId: id, ...bad });
+          t.finish({ kind: 'ok', practice: p, maxRound: maxRoundOf(rows, id), resume: resumePosition(p, rows) });
+        });
+      });
+    });
+  });
+}
+
+// ---- 射の保存（旧データを含む、唯一の保存入口） ----
+// ctx: 旧データ { practiceId: 'test-session' } ／ 新しい練習 { practiceId, round, cursorRound, rev }
+// byMember: { 部員ID: [4スロット（null=未入力）] }。保存対象のカード（部員×立）の既存の射を削除し、記録済みのスロットだけを書き込む
+// opts.now: 時刻（テスト用）
+function saveShots(db, ctx, byMember, opts = {}) {
+  let ids;
+  try { ids = validateByMember(byMember); } catch (e) { return Promise.reject(e); } // トランザクションを開く前に拒否
+  const pid = ctx && ctx.practiceId, legacy = isLegacyId(pid), now = opts.now ?? Date.now();
+  if (typeof pid !== 'string' || !pid) return Promise.reject(new TypeError('練習IDがありません'));
+  if (!legacy && !(isRound(ctx.round) && isHeld({ practiceId: pid, cursorRound: ctx.cursorRound, rev: ctx.rev }))) return Promise.reject(new TypeError('練習の保存には、立・現在の立・rev が必要です'));
+  return pdbRun(db, ['shots', 'meta'], 'readwrite', t => {
+    const st = t.tx.objectStore('shots');
+    t.get('meta', ACTIVE_KEY, act => {
+      const activeId = act && act.value && act.value.id;
+      if (act && !activeIdOk(activeId)) return t.fail(activeInvalid());
+      if (legacy) { // 旧データ: activePractice が未設定、または test-session のときだけ保存できる（新しい練習へ切り替わっていたら拒否）
+        if (act && activeId !== LEGACY_PRACTICE_ID) return t.fail(stale('practice_changed', '別の練習に切り替わっています', { active: activeId }));
+        const idx = st.index('byMember'), stales = []; let left = ids.length;
+        for (const mid of ids) {
+          const rq = idx.getAll(IDBKeyRange.only(mid));
+          rq.onsuccess = () => {
+            for (const r of rq.result) if (r.sessionId === SESSION) stales.push(r.id);
+            if (--left) return;
+            for (const k of stales) st.delete(k); // 先に削除してから…
+            for (const m2 of ids) byMember[m2].forEach((r, i) => { // …新しい射を書く（旧データの形式は変えない）
+              if (r) st.put({ id: shotKey(SESSION, m2, 1, i), sessionId: SESSION, memberId: m2, shotIndex: i, status: r.status, ...(r.status === 'located' ? { x: r.x, y: r.y } : {}), updatedAt: now });
+            });
+            t.finish({ practiceId: pid });
+          };
+        }
+        return;
+      }
+      if (!act || activeId !== pid) return t.fail(stale('practice_changed', '別の練習に切り替わっています', { active: activeId }));
+      t.get('meta', practiceKey(pid), rec => {
+        const p = rec && rec.value, held = { practiceId: pid, cursorRound: ctx.cursorRound, rev: ctx.rev }, bad = pdbVerifyHeld(p, held);
+        if (bad) return t.fail(bad);
+        pdbShotRows(t, pid, true, rows => { // 射保存も全件走査で検査する（sessionIdは対象練習だがIDが別形式の射を見逃さない。検査対象を減らして整合性を弱めない）
+          const nc = pdbInspect(p, rows); // 保存開始時点で進行情報と記録が不一致なら、何も書かずに拒否
+          if (nc) return t.fail(progressError(nc));
+          if (ctx.round > p.cursor.round) return t.fail(stale('round_out_of_range', '保存先の立が現在の立より先です', { round: ctx.round, cursor: p.cursor.round }));
+          for (const mid of ids) {
+            const [lo, hi] = cardBounds(pid, mid, ctx.round);
+            st.delete(IDBKeyRange.bound(lo, hi, false, true)); // 対象カードの既存の射を削除（他の部員・他の立には触れない）
+            byMember[mid].forEach((r, i) => {
+              if (r) st.put({ id: shotKey(pid, mid, ctx.round, i), sessionId: pid, memberId: mid, round: ctx.round, shotIndex: i, status: r.status, ...(r.status === 'located' ? { x: r.x, y: r.y } : {}), updatedAt: now });
+            });
+          }
+          t.finish({ practiceId: pid });
+        });
+      });
+    });
+  });
+}
+
+// ---- 練習の開始・切り替え・終了・立送り（データ層のみ。新しい練習を開くUIはSTEP 2-B1には含めない） ----
+// 開始: activePractice の照合（expected）・activeな新しい練習の整合性検査・練習レコードと activePractice の書き込みを、すべて同一トランザクションで行う
+// （片方だけが書かれる状態・別タブとの同時開始で両方成功する状態を作らない）
+function startPractice(db, { mode, memberId = null, id, now, expected } = {}) {
+  let p, ex;
+  try { ex = pdbExpected(expected); p = newPractice({ id: id || makePracticeId(), mode, memberId, now: now ?? Date.now() }); } catch (e) { return Promise.reject(e); }
+  return pdbRun(db, ['meta', 'shots'], 'readwrite', t => {
+    pdbCheckActive(t, ex, () => { // activePractice を読んで expected と照合し、activeな新しい練習があれば整合性も検査してから、同じトランザクション内で書く
+      t.get('meta', practiceKey(p.id), exist => {
+        if (exist) return t.fail(new PracticeError('practice_exists', null, '同じIDの練習がすでにあります'));
+        t.tx.objectStore('meta').put({ key: practiceKey(p.id), value: p });
+        t.tx.objectStore('meta').put({ key: ACTIVE_KEY, value: { id: p.id } });
+        t.finish(heldOf(p));
+      });
+    });
+  });
+}
+
+// 切り替え・再開: 切り替え元（activePractice と expected の照合・整合性）と切り替え先の整合性を同一トランザクション内で検証し（どちらかが不整合なら何も書かない）、activePractice の更新と対象練習の rev +1 を同一トランザクションで行う
+// endedAt には触れない（再開時の扱いは未定義のため、STEP 2-B1では変更しない）。旧データ（test-session）へは切り替えない
+function switchPractice(db, targetId, opts = {}) {
+  let ex;
+  try { if (!validPracticeId(targetId)) throw new TypeError(`練習IDが不正です: ${targetId}`); ex = pdbExpected(opts.expected); } catch (e) { return Promise.reject(e); }
+  const now = opts.now ?? Date.now();
+  return pdbRun(db, ['meta', 'shots'], 'readwrite', t => {
+    pdbCheckActive(t, ex, () => { // 切り替え元: activePractice と expected の照合・整合性検査（新しい練習がactiveの場合）
+      t.get('meta', practiceKey(targetId), rec => { // 切り替え先: 練習レコードと射記録の整合性検査
+        const p = rec && rec.value;
+        if (!rec) return t.fail(new PracticeError('practice_missing', null, '練習が見つかりません'));
+        if (!practiceShapeOk(p, targetId)) return t.fail(inconsistent('practice_invalid', '練習情報を正しく読み取れません'));
+        pdbShotRows(t, targetId, true, rows => {
+          const bad = pdbInspect(p, rows);
+          if (bad) return t.fail(progressError(bad));
+          if (!canBumpRev(p.rev)) return t.fail(revExhausted(p.rev)); // revの形は practiceShapeOk が検査済み。ここは +1 が安全な整数のままかだけを見る
+          const np = { ...p, rev: p.rev + 1, updatedAt: now };
+          t.tx.objectStore('meta').put({ key: practiceKey(targetId), value: np });
+          t.tx.objectStore('meta').put({ key: ACTIVE_KEY, value: { id: targetId } });
+          t.finish(heldOf(np));
+        });
+      });
+    });
+  });
+}
+
+// held（画面が保持する状態）が、DBの activePractice・cursor・rev と一致し、進行情報と記録が整合していることを、同一トランザクション内で確認してから fn を実行する
+function pdbGuarded(db, held, fn) {
+  if (!isHeld(held)) return Promise.reject(new TypeError('画面の練習状態（練習ID・現在の立・rev）が不正です'));
+  return pdbRun(db, ['meta', 'shots'], 'readwrite', t => {
+    t.get('meta', ACTIVE_KEY, act => {
+      const activeId = act && act.value && act.value.id;
+      if (act && !activeIdOk(activeId)) return t.fail(activeInvalid());
+      if (!act || activeId !== held.practiceId) return t.fail(stale('practice_changed', '別の練習に切り替わっています', { active: activeId }));
+      t.get('meta', practiceKey(held.practiceId), rec => {
+        const p = rec && rec.value, bad = pdbVerifyHeld(p, held);
+        if (bad) return t.fail(bad);
+        pdbShotRows(t, held.practiceId, true, rows => {
+          const nc = pdbInspect(p, rows);
+          if (nc) return t.fail(progressError(nc));
+          fn(t, p, rows);
+        });
+      });
+    });
+  });
+}
+
+// 「次の立へ」: 現在の立に記録済みの射が1つ以上あるときだけ、cursor.round +1・rev +1・updatedAt を更新する
+// 成功したときだけ新しい held を返す（失敗時は reject。呼び出し側は画面を進めない）。1〜3射のときの確認は画面側の責務
+function advanceRound(db, held, opts = {}) {
+  const now = opts.now ?? Date.now();
+  return pdbGuarded(db, held, (t, p, rows) => {
+    if (!canBumpRev(p.rev)) return t.fail(revExhausted(p.rev));
+    if (!isRound(p.cursor.round + 1)) return t.fail(exhausted('round_exhausted', '立の番号が上限に達しているため、次の立へは進めません', { round: p.cursor.round })); // 不正なcursorを書いてから次の読み込みで検出するのではなく、書き込む前に拒否する
+    const n = rows.filter(r => r && r.sessionId === p.id && r.round === p.cursor.round && Number.isInteger(r.shotIndex)).length;
+    if (n < 1) return t.fail(stale('round_empty', '現在の立に記録済みの射がないため、次の立へは進めません', { round: p.cursor.round }));
+    const np = { ...p, cursor: { ...p.cursor, round: p.cursor.round + 1 }, rev: p.rev + 1, updatedAt: now };
+    t.tx.objectStore('meta').put({ key: practiceKey(p.id), value: np });
+    t.finish(heldOf(np));
+  });
+}
+
+// 終了: endedAt の設定・rev +1・activePractice の解除を同一トランザクションで行う。練習レコードは削除しない
+function endPractice(db, held, opts = {}) {
+  const now = opts.now ?? Date.now();
+  return pdbGuarded(db, held, (t, p) => {
+    if (!canBumpRev(p.rev)) return t.fail(revExhausted(p.rev));
+    t.tx.objectStore('meta').put({ key: practiceKey(p.id), value: { ...p, endedAt: now, rev: p.rev + 1, updatedAt: now } });
+    t.tx.objectStore('meta').delete(ACTIVE_KEY);
+    t.finish({ practiceId: p.id, endedAt: now, rev: p.rev + 1 });
+  });
+}
+
 // ---- shot-csv.js ----
 // 射記録CSV（純粋関数。DBやDOMには触れない）。部員CSV（csv.js）とは別の処理で、guardFormula は使わない
 // 列: ID（部員番号）, member_name, STATUS, 射, 結果（◯＝的中／×＝外れ・位置不明）, 的中率（N射M中。Nは記録済みの射数）, x, y（右端。位置不明は空欄）
 // ID は部員番号（登録順に振った固定の番号）。番号がない部員・部員情報がない射は、部員IDで出す（落とさない）
 const SHOT_CSV_HEADERS = ['ID', 'member_name', 'STATUS', '射', '結果', '的中率', 'x', 'y'];
+// STEP 2-B1: 既存8列の右端に練習情報の4列を追加する（既存8列の列名・順序・意味・値は変えない）
+//   practice_id: 練習ID（旧データは test-session）／ practice_date: 練習開始時の端末ローカル日付 YYYY-MM-DD（旧データ・練習情報のない射は空欄）
+//   recording_mode: member_order / personal_series（旧データは member_order。練習情報のない射は空欄）／ round: 立番号（旧データは 1。練習情報のない射は、射に立があればその値、なければ空欄）
+const SHOT_CSV_PRACTICE_HEADERS = ['practice_id', 'practice_date', 'recording_mode', 'round'];
+const SHOT_CSV_ALL_HEADERS = [...SHOT_CSV_HEADERS, ...SHOT_CSV_PRACTICE_HEADERS];
 const MARK_HIT = '◯', MARK_MISS = '×';
 class ShotCsvError extends Error { constructor(code, msg) { super(msg); this.name = 'ShotCsvError'; this.code = code; } }
 
@@ -513,6 +883,33 @@ const numCell = v => Object.is(v, -0) ? '-0' : String(v);
 // 端末のローカル日付（toISOString は使わない）
 const shotCsvFileName = (d = new Date()) => { const p = n => String(n).padStart(2, '0'); return `射記録_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}.csv`; };
 
+// 練習メタデータ（meta ストアの { key: 'practice:<id>', value } の行）を検証し、値の配列にして返す（F-6）。
+// 壊れたメタデータを取得対象から除外すると、その練習の射が「練習情報のない射」として黙って出力されてしまう。除外せず、CSV出力を拒否する。
+//   検査: キーが 'practice:' で始まる ／ キーのID が新しい練習IDの形式（旧データ test-session はメタデータを持たない） ／ 値がobject ／ 値の id がキーのIDと一致 ／ 記録モード・rev が正しい ／ date が実在する日付 ／ startedAt が有限の数値（CSVの練習順序の基準のため）
+// 読み取り専用の検査のみ。DBには触れず、アプリ全体のロックもしない（CSV出力の拒否だけ）
+const shortKey = k => { const t = String(k); return t.length > 40 ? t.slice(0, 40) + '…' : t; };
+// 実在する日付か（YYYY-MM-DD の形式 ＋ 暦として存在する。2026-99-99・2026-02-30・平年の2月29日は不可）
+const isRealDate = s => {
+  if (typeof s !== 'string' || !DATE_RE.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number), t = new Date(Date.UTC(y, m - 1, d)); t.setUTCFullYear(y);
+  return y >= 1 && t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+};
+function practiceValuesFromMeta(rows) {
+  const bad = (code, msg) => new ShotCsvError(code, msg);
+  return (rows || []).map(row => {
+    const key = row && typeof row === 'object' ? row.key : undefined;
+    if (typeof key !== 'string' || !key.startsWith(PRACTICE_PREFIX)) throw bad('bad_practice', '練習情報のキーが正しくありません');
+    const id = key.slice(PRACTICE_PREFIX.length), v = row.value;
+    if (!validPracticeId(id)) throw bad('bad_practice', `練習情報のIDが正しくありません（${shortKey(key)}）`);
+    if (!v || typeof v !== 'object' || Array.isArray(v)) throw bad('bad_practice', `練習情報の値が正しくありません（${shortKey(key)}）`);
+    if (v.id !== id) throw bad('bad_practice', `練習情報のキーと値のIDが一致しません（${shortKey(key)}）`);
+    if (!practiceShapeOk(v, id)) throw bad('bad_practice', `練習情報の必須項目（記録モード・rev）が正しくありません（${shortKey(key)}）`);
+    if (!isRealDate(v.date)) throw bad('bad_practice', `練習情報の日付が正しくありません（${shortKey(key)}）`);
+    if (typeof v.startedAt !== 'number' || !Number.isFinite(v.startedAt)) throw bad('bad_practice', `練習情報の開始日時が正しくありません（${shortKey(key)}）`);
+    return v;
+  });
+}
+
 const UNKNOWN = { name: '', status: 'unknown' }; // 対応する部員がいない射（通常は発生しない）。落とさずに出す
 
 function checkShot(r) {
@@ -523,38 +920,63 @@ function checkShot(r) {
   else if (r.status !== 'unlocated_miss') throw new ShotCsvError('bad_record', `状態が不正です（${r.memberId} の${r.shotIndex + 1}射目）`);
 }
 
-// shots: DBの射レコード（保存済みのものだけ）。members: DBの全部員（非表示を含む）
+// shots: DBの射レコード（保存済みのものだけ。すべての練習）。members: DBの全部員（非表示を含む）。practices: 練習メタデータの値（省略可）
 // 戻り値: { csv, count }。出力する射が0件のときは ShotCsvError('empty') を投げる（空のCSVを成功扱いにしない）
-function buildShotCsv(shots, members) {
+// 並び順: 練習（旧データ → 開始日時の古い順 → 練習情報のない射）→ 立 → 部員（名簿順）→ 射番号
+// 的中率: 同一練習・同一立・同一部員の、記録済みの射だけを数える（別の練習・別の立は合算しない）
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function buildShotCsv(shots, members, practices = []) {
   if (!Array.isArray(shots) || !shots.length) throw new ShotCsvError('empty', '出力できる保存済み射記録がありません');
   for (const r of shots) checkShot(r);
   const byId = new Map(members.map(m => [m.id, m]));
-  // 並び順: 有効部員（名簿順）→ 非表示部員 → 対応する部員がいないID。各部員の中は射番号順
+  // 値だけを渡された場合の防御（F-6）: object でない値・不正な練習IDを、黙って無視して孤立データ扱いにしない（モード・日付などの細部は、従来どおり出力側で空欄にする）
+  for (const p of practices || []) if (!p || typeof p !== 'object' || Array.isArray(p) || !validPracticeId(p.id)) throw new ShotCsvError('bad_practice', '練習情報が正しくありません');
+  const pById = new Map((practices || []).map(p => [p.id, p]));
+  // 練習情報のある射は、R7（practice.js の inspectShots）と同じ基準で検査する。不正な射を黙って出力しない（旧データ・孤立した射は対象外）
+  //   1回の走査で、sessionId または ID の前方一致が練習に一致する射を、練習ごとに振り分ける
+  const owned = new Map();
+  for (const r of shots) for (const o of new Set([r.sessionId, typeof r.id === 'string' && r.id.includes(':') ? r.id.slice(0, r.id.indexOf(':')) : null])) if (pById.has(o)) { if (!owned.has(o)) owned.set(o, []); owned.get(o).push(r); }
+  for (const [pid, rs] of owned) { const bad = inspectShots(pid, rs); if (bad) throw new ShotCsvError('bad_record', `練習の射の記録が正しくありません（${bad.reason}）`); }
+  // 部員の並び: 有効部員（名簿順）→ 非表示部員 → 対応する部員がいないID。各部員の中は射番号順
   const order = new Map(); let k = 0;
   for (const m of sortActive(members.slice()).concat(sortHidden(members.slice()))) order.set(m.id, k++);
   const orphans = [...new Set(shots.map(r => r.memberId).filter(id => !byId.has(id)))].sort();
   for (const id of orphans) order.set(id, k++);
-  const rows = shots.slice().sort((a, b) => (order.get(a.memberId) - order.get(b.memberId)) || (a.shotIndex - b.shotIndex));
-  const lines = [SHOT_CSV_HEADERS.join(',')];
-  // 的中率: 部員ごとに「記録済みの射数」と「的中の射数」を数える（未入力の射は分母に入れない。位置不明の外れは外れ）
-  const tally = new Map();
-  for (const r of rows) { const t = tally.get(r.memberId) || { n: 0, hit: 0 }; t.n++; if (r.status === 'located' && isHit(r.x, r.y)) t.hit++; tally.set(r.memberId, t); }
-  for (const r of rows) {
-    const m = byId.get(r.memberId) || UNKNOWN, t = tally.get(r.memberId), hit = r.status === 'located' && isHit(r.x, r.y);
-    const located = r.status === 'located';
-    lines.push([hasNumber(m) ? String(m.number) : textCell(r.memberId), textCell(m.name), textCell(m.status), String(r.shotIndex + 1), hit ? MARK_HIT : MARK_MISS, `${t.n}射${t.hit}中`, located ? numCell(r.x) : '', located ? numCell(r.y) : ''].join(','));
+  // 各射の練習情報。旧データは固定値、練習情報のある射は立が必須、練習情報のない射（孤立した射）は落とさずに出す
+  const info = r => {
+    const sid = typeof r.sessionId === 'string' ? r.sessionId : '';
+    if (sid === LEGACY_PRACTICE_ID) return { g: 0, sid, start: 0, date: '', mode: MODE_MEMBER_ORDER, round: 1 };
+    const p = pById.get(sid);
+    if (p) {
+      if (!isRound(r.round)) throw new ShotCsvError('bad_record', `立番号が不正です（${r.memberId} の${r.shotIndex + 1}射目）`);
+      return { g: 1, sid, start: Number.isFinite(p.startedAt) ? p.startedAt : Infinity, date: DATE_RE.test(p.date) ? p.date : '', mode: PRACTICE_MODES.includes(p.mode) ? p.mode : '', round: r.round };
+    }
+    return { g: 2, sid, start: 0, date: '', mode: '', round: isRound(r.round) ? r.round : '' };
+  };
+  const rows = shots.map(r => ({ r, i: info(r) }));
+  const cmp = (a, b) => (a.i.g - b.i.g) || (a.i.start - b.i.start || 0) || (a.i.sid < b.i.sid ? -1 : a.i.sid > b.i.sid ? 1 : 0) || ((a.i.round || 0) - (b.i.round || 0)) || (order.get(a.r.memberId) - order.get(b.r.memberId)) || (a.r.shotIndex - b.r.shotIndex);
+  rows.sort(cmp);
+  const lines = [SHOT_CSV_ALL_HEADERS.join(',')];
+  const tally = new Map(), key = ({ r, i }) => `${i.sid}\u0000${i.round}\u0000${r.memberId}`;
+  for (const x of rows) { const t = tally.get(key(x)) || { n: 0, hit: 0 }; t.n++; if (x.r.status === 'located' && isHit(x.r.x, x.r.y)) t.hit++; tally.set(key(x), t); }
+  for (const x of rows) {
+    const { r, i } = x, m = byId.get(r.memberId) || UNKNOWN, t = tally.get(key(x)), hit = r.status === 'located' && isHit(r.x, r.y), located = r.status === 'located';
+    lines.push([hasNumber(m) ? String(m.number) : textCell(r.memberId), textCell(m.name), textCell(m.status), String(r.shotIndex + 1), hit ? MARK_HIT : MARK_MISS, `${t.n}射${t.hit}中`, located ? numCell(r.x) : '', located ? numCell(r.y) : '',
+      textCell(i.sid), textCell(i.date), textCell(i.mode), String(i.round)].join(','));
   }
   return { csv: '\uFEFF' + lines.join('\r\n') + '\r\n', count: rows.length };
 }
 
 // ---- shot-export.js ----
-// 射記録CSV用の読み取り専用の取得。shots と members を1つの readonly トランザクションで読む（書き込み・削除はしない）
-// 非表示部員の射も含めて全件返す（membersの状態では絞り込まない）
+// 射記録CSV用の読み取り専用の取得。shots・members・meta（練習メタデータだけ）を1つの readonly トランザクションで読む（書き込み・削除はしない）
+// 練習メタデータが壊れている場合は、孤立した射として出力せず、CSV出力を拒否する（F-6）。本当にメタデータがない射（孤立した射）は従来どおり含める
+// 非表示部員の射も、すべての練習（旧データ・新しい練習・練習情報のない射）も含めて全件返す（絞り込まない）
 async function readShotExportData(db) {
-  const tx = db.transaction(['shots', 'members'], 'readonly');
+  const tx = db.transaction(['shots', 'members', 'meta'], 'readonly');
   const s = tx.objectStore('shots').getAll(), m = tx.objectStore('members').getAll();
+  const pm = tx.objectStore('meta').getAll(IDBKeyRange.bound(PRACTICE_PREFIX, 'practice;', false, true)); // 'practice:' で始まるキーだけ
   await done(tx);
-  return { shots: s.result.filter(r => r.sessionId === SESSION), members: m.result };
+  return { shots: s.result, members: m.result, practices: practiceValuesFromMeta(pm.result) }; // キーと値の整合性を確認する。壊れたメタデータは除外せず ShotCsvError（CSV出力の拒否）
 }
 
 // ---- roster-view.js ----
@@ -676,6 +1098,10 @@ const keyDiff = (a, b) => { const A = JSON.parse(a || '{}'), B = JSON.parse(b), 
 const changedMembers = (a, b) => { const A = JSON.parse(a || '{}'), B = JSON.parse(b), out = []; for (const id in B) if (JSON.stringify(B[id]) !== JSON.stringify(A[id] || Array(SHOTS).fill(null))) out.push(id); return out; };
 // 別タブがDBのバージョンを更新（versionchange）した後に表示する案内
 const LOCK_MSG = '別のタブで保存領域が更新されました。ページを再読み込みしてください。再読み込みするまで記録・部員管理は利用できません';
+const UNSUPPORTED_MSG = 'この版では新しい練習を開けません。';
+const STOP_TAIL = '記録・立送り・練習の切り替え・CSV出力は利用できません。';
+const SHOT_REASON = { round_invalid: '立の番号が正しくない記録があります', shot_index_invalid: '射の番号が正しくない記録があります', session_mismatch: '記録が属する練習の情報が食い違っています', shot_key_mismatch: '記録の識別情報が内容と一致しない記録があります', shot_duplicate: '同じ射の記録が重複しています' };
+const STALE_HEAD = { practice_changed: 'この画面とは別の練習に切り替わっています。', cursor_changed: 'この練習の現在の立が、別の画面で変更されています。', rev_changed: 'この練習の状態が、別の画面で変更されています。', round_out_of_range: '保存先の立が、現在の立と一致しません。', round_empty: '現在の立の記録が、別の画面で変更されています。' };
 const info = r => !r ? { t: '未入力', s: '－' } : r.status === 'unlocated_miss' ? { t: '位置不明の外れ', s: '？' } : isHit(r.x, r.y) ? { t: '的中', s: '○' } : { t: '外れ', s: '×' };
 
 // env はテスト用の差し替え口（既定はブラウザの実物）
@@ -696,7 +1122,25 @@ function startApp(env = {}) {
   let roster = [];                 // DBの全部員（非表示を含む）
   let activeMembers = [], store = null, curSig = ''; // Storeに渡した有効部員と、その構成（有効部員IDの並び）
   let saveState = 'pending', saveReason = '', unsaved = new Set(), seq = 0, okSeq = 0, savedJson = ''; // 保存状態: pending / ok / unavailable
-  let db = null, dbPending = true, syncing = false, deferred = false, blocked = false, locked = false, tab = 'rec'; // locked: versionchange後。この画面は保存できないため、記録・部員管理を禁止する
+  let db = null, dbPending = true, syncing = false, deferred = false, blocked = false, locked = false, tab = 'rec'; // locked: この画面は保存できない（または記録してはいけない）ため、記録・部員管理・CSV出力を禁止する
+  let lockKind = 'versionchange', lockInfo = {}; // 種類: versionchange（別タブがDBを更新）／ stale（別の画面で練習の状態が変わった）／ inconsistent（練習の進行情報と記録が不一致）／ unsupported（この版では開けない練習）
+  const lockMsg = () => {
+    if (lockKind === 'inconsistent') {
+      const i = lockInfo || {}, head = i.code === 'shot_invalid' ? `この練習の射の記録に、正しくないデータがあります（${SHOT_REASON[i.reason] || '内容を確認できません'}）。` : i.code === 'cursor_behind' ? `この練習の進行情報（現在の立: ${i.cursor}）と記録（最大の立: ${i.maxRound}）が一致しません。` : i.code === 'cursor_invalid' ? 'この練習の進行情報（現在の立）が正しい値ではありません。' : 'この練習の情報を正しく読み取れません。';
+      return `${head}\nデータは変更していません。\n${STOP_TAIL}`;
+    }
+    if (lockKind === 'stale') return `${STALE_HEAD[(lockInfo || {}).code] || '別の画面で練習の状態が変更されました。'}\nデータは変更していません。保存できなかった記録は、この画面に未保存として残しています。\nページを再読み込みしてください。再読み込みするまで記録・部員管理・CSV出力は利用できません。`;
+    if (lockKind === 'unsupported') return UNSUPPORTED_MSG;
+    return LOCK_MSG;
+  };
+  // 画面を停止する（解除は再読み込みのみ）。表示中の記録は消さない。接続は閉じ、以後この画面からは保存しない
+  function lockApp(kind, info) {
+    if (locked) return;
+    locked = true; lockKind = kind; lockInfo = info || {}; drag = null; deferred = false; saveState = 'unavailable';
+    saveReason = kind === 'stale' ? '別の画面で練習の状態が変更されました' : kind === 'inconsistent' ? '練習の進行情報と記録が一致しません' : 'この版では新しい練習を開けません';
+    if (db) { const d = db; db = null; try { d.close(); } catch {} }
+    say(lockMsg(), true); render(); rosterView.render();
+  }
   const inflight = new Set();
 
   function makeStore(members, init) {
@@ -712,8 +1156,13 @@ function startApp(env = {}) {
     if (!targets.length) return;
     const mine = ++seq, byMember = {};
     for (const id of targets) byMember[id] = s.records[id];
-    const p = saveMemberShots(db, byMember).then(() => { if (mine > okSeq) { okSeq = mine; savedJson = snap; } if (mine === seq) unsaved = new Set(); render(); },
-      () => { if (mine === seq) { unsaved = keyDiff(savedJson, snap); say('保存に失敗しました。未保存の射に印を付けています', true); } render(); });
+    const p = saveShots(db, { practiceId: LEGACY_PRACTICE_ID }, byMember).then(() => { if (mine > okSeq) { okSeq = mine; savedJson = snap; } if (mine === seq) unsaved = new Set(); render(); },
+      err => {
+        if (mine === seq) unsaved = keyDiff(savedJson, snap);
+        if (err && err.lock) lockApp(err.lock, { code: err.code, ...err.detail }); // 別の画面で練習の状態が変わった／進行情報が不一致: 保存せず停止し、未保存の射は画面に残す
+        else if (mine === seq) say('保存に失敗しました。未保存の射に印を付けています', true);
+        render();
+      });
     inflight.add(p); p.then(() => inflight.delete(p));
   }
   const unsavedNow = () => !!store && (unsaved.size > 0 || savedJson !== JSON.stringify(store.state.records));
@@ -748,16 +1197,16 @@ function startApp(env = {}) {
     $('recView').hidden = !(rec && store); $('rosterView').hidden = rec;
     const empty = rec && !store;
     $('empty').hidden = !empty;
-    if (empty) $('empty').textContent = dbPending ? '保存領域を準備中です…' : saveState === 'unavailable' ? `部員名簿を読み込めません。保存領域を確認してください（原因: ${saveReason || '不明'}）。${blocked ? '他のタブやホーム画面のアプリを閉じてから、' : ''}使えるようになったら、このページを再読み込みしてください。それまで記録はできません` : '有効な部員がいません。「部員管理」で部員を登録してください';
+    if (empty) $('empty').textContent = dbPending ? '保存領域を準備中です…' : locked && lockKind !== 'versionchange' ? lockMsg() : saveState === 'unavailable' ? `部員名簿を読み込めません。保存領域を確認してください（原因: ${saveReason || '不明'}）。${blocked ? '他のタブやホーム画面のアプリを閉じてから、' : ''}使えるようになったら、このページを再読み込みしてください。それまで記録はできません` : '有効な部員がいません。「部員管理」で部員を登録してください';
     const lockedUnsaved = locked && store ? keyDiff(savedJson, JSON.stringify(store.state.records)).size : 0;
     $('banner').hidden = !(locked || (rec && deferred));
-    $('banner').textContent = locked ? LOCK_MSG + (lockedUnsaved ? `　この画面の未保存の記録（${lockedUnsaved}件）は保存されていません。` : '') : deferred ? '部員の変更はまだ反映されていません。未保存の記録が保存されたあと、記録画面を開き直すと反映されます' : '';
+    $('banner').textContent = locked ? lockMsg() + (lockedUnsaved ? `　この画面の未保存の記録（${lockedUnsaved}件）は保存されていません。` : '') : deferred ? '部員の変更はまだ反映されていません。未保存の記録が保存されたあと、記録画面を開き直すと反映されます' : '';
     if (!store) { $('who').textContent = ''; $('now').textContent = ''; }
     $('shotCsv').disabled = locked || !db || dbPending; // 射記録CSVは、保存領域を使えるときだけ
   }
   function renderBadge() {
     const lockedN = locked && store ? keyDiff(savedJson, JSON.stringify(store.state.records)).size : 0;
-    const T = locked ? [lockedN ? `未保存 ${lockedN}件（保存できません）` : '保存済みの記録のみ（保存できません）', 'bad'] : { pending: ['保存準備中', ''], ok: unsaved.size ? [`未保存 ${unsaved.size}件（保存に失敗）`, 'bad'] : ['保存可能', 'ok'], unavailable: [store ? '未保存（保存できません）' : '保存領域を使えません', 'bad'] }[saveState];
+    const T = locked ? [lockedN ? `未保存 ${lockedN}件（保存できません）` : !store && lockKind !== 'versionchange' ? '記録を停止しています' : '保存済みの記録のみ（保存できません）', 'bad'] : { pending: ['保存準備中', ''], ok: unsaved.size ? [`未保存 ${unsaved.size}件（保存に失敗）`, 'bad'] : ['保存可能', 'ok'], unavailable: [store ? '未保存（保存できません）' : '保存領域を使えません', 'bad'] }[saveState];
     $('save').textContent = T[0]; $('save').className = T[1]; $('save').title = saveReason;
   }
   function render() {
@@ -786,7 +1235,7 @@ function startApp(env = {}) {
   const apply = e => { const w = pointToWorld(e.clientX, e.clientY, $('target').getBoundingClientRect(), view()); const r = store.place(drag.i, w.x, w.y); if (!r.ok) say(r.reason, true); return r.ok; };
   const target = $('target');
   target.addEventListener('pointerdown', e => {
-    if (locked) return say(LOCK_MSG, true);
+    if (locked) return say(lockMsg(), true);
     if (dbPending) return say('保存領域を準備中です。少しお待ちください', true);
     if (!store && saveState === 'unavailable') return say('部員名簿を読み込めないため、記録できません', true);
     if (syncing || !store) return say('部員の読み込み中です。少しお待ちください', true);
@@ -802,19 +1251,19 @@ function startApp(env = {}) {
   });
   target.addEventListener('pointercancel', () => { if (drag) { if (drag.store === store) store.restore(drag.before); drag = null; } });
   // view=true は表示の切り替えだけ（部員の移動）。記録を変える操作は locked のあいだ使えない
-  const on = (id, fn, view) => { $(id).onclick = () => { if (!store || syncing) return; if (locked && !view) return say(LOCK_MSG, true); fn(); }; };
-  $('chips').onclick = e => { const b = e.target.closest('button'); if (b && store && !syncing) { if (locked) return say(LOCK_MSG, true); store.select(+b.dataset.i); say(''); } };
+  const on = (id, fn, view) => { $(id).onclick = () => { if (!store || syncing) return; if (locked && !view) return say(lockMsg(), true); fn(); }; };
+  $('chips').onclick = e => { const b = e.target.closest('button'); if (b && store && !syncing) { if (locked) return say(lockMsg(), true); store.select(+b.dataset.i); say(''); } };
   on('unloc', () => { const i = store.state.sel; store.unlocated(i); say(`${i + 1}射目：位置不明の外れ`); });
   on('del', () => { const i = store.state.sel; store.remove(i); say(`${i + 1}射目を削除しました（取り消しで戻せます）`); });
   on('undo', () => { store.undo(); say('直前の操作を取り消しました'); });
-  on('prev', () => { store.prev(); say(locked ? LOCK_MSG : ''); }, true);
-  on('next', () => { store.next(); say(locked ? LOCK_MSG : store.state.mi === store.state.members.length - 1 ? '最後の部員です' : ''); }, true);
-  $('jump').onchange = e => { if (store && !syncing) { store.goto(+e.target.value); say(locked ? LOCK_MSG : ''); } };
+  on('prev', () => { store.prev(); say(locked ? lockMsg() : ''); }, true);
+  on('next', () => { store.next(); say(locked ? lockMsg() : store.state.mi === store.state.members.length - 1 ? '最後の部員です' : ''); }, true);
+  $('jump').onchange = e => { if (store && !syncing) { store.goto(+e.target.value); say(locked ? lockMsg() : ''); } };
   $('flip').onchange = e => { flip = e.target.checked; setLs('flip', flip ? '1' : '0'); render(); };
   $('half').onchange = e => { half = +e.target.value; setLs('half', half); render(); };
 
   // ---- 部員管理 ----
-  const need = () => { if (locked) throw new Error(LOCK_MSG); if (!db) throw new Error('保存領域を使えないため、部員の変更はできません'); };
+  const need = () => { if (locked) throw new Error(lockMsg()); if (!db) throw new Error('保存領域を使えないため、部員の変更はできません'); };
   const refresh = async () => { roster = await listMembers(db); rosterView.render(); };
   const readFile = f => f instanceof Uint8Array || f instanceof ArrayBuffer ? Promise.resolve(f) : f.arrayBuffer ? f.arrayBuffer() : new Promise((res, rej) => { const r = new win.FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsArrayBuffer(f); });
   function download(name, text) {
@@ -836,14 +1285,14 @@ function startApp(env = {}) {
   let exporting = false;
   async function exportShotCsv() {
     if (exporting) return;
-    const refuse = () => locked ? say(LOCK_MSG, true) : dbPending ? say('保存領域を準備中です。少しお待ちください', true) : !db ? say('保存領域を使えないため、射記録CSVは出力できません', true) : false;
+    const refuse = () => locked ? say(lockMsg(), true) : dbPending ? say('保存領域を準備中です。少しお待ちください', true) : !db ? say('保存領域を使えないため、射記録CSVは出力できません', true) : false;
     if (refuse() !== false) return;
     exporting = true;
     try {
       await Promise.allSettled([...inflight]); // 保存中の射があれば、結果が出てから読む
       if (refuse() !== false) return;
-      const { shots, members } = await readShotExportData(db);
-      const { csv, count } = buildShotCsv(shots, members); // 0件のときは ShotCsvError('empty')
+      const { shots, members, practices } = await readShotExportData(db);
+      const { csv, count } = buildShotCsv(shots, members, practices); // 0件のときは ShotCsvError('empty')
       const n = store ? Math.max(unsaved.size, keyDiff(savedJson, JSON.stringify(store.state.records)).size) : 0;
       if (n > 0 && !confirmFn(`未保存の射が${n}件あります。今回のCSVには、データベースに保存済みの射記録のみが含まれます。続行しますか？`)) return say('CSVの出力を中止しました');
       if (refuse() !== false) return; // 読み込みや確認のあいだに versionchange が起きていたら出力しない
@@ -855,7 +1304,7 @@ function startApp(env = {}) {
   }
   $('shotCsv').onclick = () => { exportShotCsv(); };
 
-  const rosterView = createRosterView({ doc, root: $('rosterView'), ops, getState: () => ({ members: roster, canEdit: !!db && !dbPending, syncing, reason: locked ? LOCK_MSG : dbPending ? '保存領域を準備中です' : '保存領域を使えないため、部員管理は表示のみです（' + (saveReason || '原因不明') + '）' }) });
+  const rosterView = createRosterView({ doc, root: $('rosterView'), ops, getState: () => ({ members: roster, canEdit: !!db && !dbPending, syncing, reason: locked ? lockMsg() : dbPending ? '保存領域を準備中です' : '保存領域を使えないため、部員管理は表示のみです（' + (saveReason || '原因不明') + '）' }) });
 
   // 部員構成（有効部員IDの並び）が変わったときだけ、保存済みデータを読み直してStoreを作り直す（Undo履歴は切れる）
   async function rebuildStore(d, keepId) {
@@ -890,12 +1339,15 @@ function startApp(env = {}) {
   // 画面の描画とボタン登録を先に済ませ、IndexedDBは後から非同期で準備する（応答しなくても画面は動く）
   render(); rosterView.render();
   const ready = (async () => {
-    let d = null;
+    let d = null, practiceFailed = false;
     try {
       d = await withTimeout(openDb({ idb, onBlocked: () => { blocked = true; say('他のタブやホーム画面のアプリを閉じてください（データベース更新待ち）', true); }, onVersionChange: () => {
-        db = null; locked = true; drag = null; deferred = false; saveState = 'unavailable'; saveReason = '別のタブで保存領域が更新されました'; // 接続は openDb 側で閉じ済み。表示中の記録は消さない
-        say(LOCK_MSG, true); render(); rosterView.render();
+        db = null; locked = true; lockKind = 'versionchange'; lockInfo = {}; drag = null; deferred = false; saveState = 'unavailable'; saveReason = '別のタブで保存領域が更新されました'; // 接続は openDb 側で閉じ済み。表示中の記録は消さない
+        say(lockMsg(), true); render(); rosterView.render();
       } }), timeoutMs, late => late.close());
+      // 練習情報（activePractice・練習レコード・対象練習の射）を先に確認する。読めない・不整合・この版で扱えない練習なら、旧データへフォールバックせず、Storeを作らずに停止する
+      let ps; try { ps = await withTimeout(loadPracticeState(d), timeoutMs); } catch (e) { practiceFailed = true; throw e; }
+      if (ps.kind === 'inconsistent' || ps.kind === 'ok') { try { d.close(); } catch {} lockApp(ps.kind === 'ok' ? 'unsupported' : 'inconsistent', ps); dbPending = false; render(); rosterView.render(); return; }
       roster = await withTimeout(listMembers(d), timeoutMs);
       if (roster.some(m => !hasNumber(m))) { // 番号機能の追加前に登録した部員へ、登録順に部員番号を振る（失敗しても名簿・記録は使える）
         try { await withTimeout(assignMissingNumbers(d), timeoutMs); roster = await withTimeout(listMembers(d), timeoutMs); } catch {}
@@ -904,7 +1356,7 @@ function startApp(env = {}) {
       db = d; saveState = 'ok'; say('');
     } catch (e) {
       if (d) { try { d.close(); } catch {} }
-      saveState = 'unavailable'; saveReason = blocked ? '他のタブが使用中です' : `${e && e.name || ''} ${e && e.message || ''}`.trim() || '原因不明';
+      saveState = 'unavailable'; saveReason = blocked ? '他のタブが使用中です' : (practiceFailed ? '練習情報の読み込みに失敗: ' : '') + `${e && e.name || ''} ${e && e.message || ''}`.trim() || '原因不明';
       say(`部員名簿を読み込めません（${saveReason}）。${blocked ? '他のタブやホーム画面のアプリを閉じて、' : ''}保存領域を確認し、再読み込みしてください`, true);
       // 名簿または保存済みの記録を正常に読めないときは、記録画面を使えない状態にする（仮名簿・一部だけの名簿では記録させない）
       store = null; activeMembers = []; curSig = ''; savedJson = ''; unsaved = new Set(); roster = [];
